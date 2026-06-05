@@ -1,5 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
+
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import '../../services/bt_printer_service.dart';
+import '../../services/barcode_server_service.dart';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -33,6 +41,7 @@ import '../../services/upload_service.dart';
 import '../../models/announcement_model.dart';
 import '../../services/announcement_service.dart';
 import '../chat/chat_screen.dart';
+import 'pos_screen.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +72,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   static final _pages = [
     const _DashboardTab(),
     const _AdminManageTab(),
+    const PosScreen(),
     const _AdminSettingsTab(),
   ];
 
@@ -74,9 +84,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   static const _navItems = [
-    (Icons.dashboard_rounded,      Icons.dashboard_outlined,      'Dashboard'),
-    (Icons.grid_view_rounded,      Icons.grid_view_outlined,      'Manage'),
-    (Icons.settings_rounded,       Icons.settings_outlined,       'Settings'),
+    (Icons.dashboard_rounded, Icons.dashboard_outlined, 'Dashboard'),
+    (Icons.grid_view_rounded, Icons.grid_view_outlined, 'Manage'),
+    (Icons.point_of_sale_rounded, Icons.point_of_sale_outlined, 'POS'),
+    (Icons.settings_rounded, Icons.settings_outlined, 'Settings'),
   ];
 
   @override
@@ -171,9 +182,17 @@ class _DashboardTabState extends State<_DashboardTab> {
   List<Map<String, dynamic>> recentOrders = [];
   List<Map<String, dynamic>> topProducts = [];
 
+  // POS stats
+  double todayPosSales = 0.0;
+  double monthPosSales = 0.0;
+  int todayPosCount = 0;
+  int monthPosCount = 0;
+  List<Map<String, dynamic>> recentPosSales = [];
+
   StreamSubscription? _ordersSub;
   StreamSubscription? _productsSub;
   StreamSubscription? _usersSub;
+  StreamSubscription? _posSub;
 
   @override
   void initState() {
@@ -186,6 +205,7 @@ class _DashboardTabState extends State<_DashboardTab> {
     _ordersSub?.cancel();
     _productsSub?.cancel();
     _usersSub?.cancel();
+    _posSub?.cancel();
     super.dispose();
   }
 
@@ -209,7 +229,8 @@ class _DashboardTabState extends State<_DashboardTab> {
       for (final doc in snap.docs) {
         final m = _docToMap(doc);
         revenue += _parseDouble(m['totalPrice']);
-        if ((m['status'] ?? '').toString().toLowerCase() == 'pending') pending++;
+        if ((m['status'] ?? '').toString().toLowerCase() == 'pending')
+          pending++;
         orderMaps.add(m);
       }
       if (mounted) {
@@ -251,6 +272,53 @@ class _DashboardTabState extends State<_DashboardTab> {
         });
       }
     });
+
+    // POS sales — today + month totals
+    _posSub?.cancel();
+    final now = DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    final monthStart = DateTime(now.year, now.month, 1);
+
+    _posSub = db
+        .collection('pos_sales')
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .listen((snap) {
+      double todaySales = 0;
+      double monthSales = 0;
+      int todayCount = 0;
+      int monthCount = 0;
+      final recent = <Map<String, dynamic>>[];
+
+      for (final doc in snap.docs) {
+        final m = _docToMap(doc);
+        // Skip refund records
+        if ((m['type'] ?? '') == 'refund') continue;
+        final dateStr = (m['createdAt'] ?? '').toString();
+        final date = DateTime.tryParse(dateStr);
+        if (date == null) continue;
+        final total = _parseDouble(m['total']);
+        if (!date.isBefore(monthStart)) {
+          monthSales += total;
+          monthCount++;
+          if (!date.isBefore(todayStart)) {
+            todaySales += total;
+            todayCount++;
+          }
+        }
+        if (recent.length < 5) recent.add(m);
+      }
+
+      if (mounted) {
+        setState(() {
+          todayPosSales = todaySales;
+          monthPosSales = monthSales;
+          todayPosCount = todayCount;
+          monthPosCount = monthCount;
+          recentPosSales = recent;
+        });
+      }
+    });
   }
 
   @override
@@ -280,6 +348,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _buildStatsGrid(context),
+                      const SizedBox(height: 28),
+                      _buildPosSummary(context),
                       const SizedBox(height: 28),
                       _sectionTitle('Recent Orders'),
                       const SizedBox(height: 12),
@@ -369,7 +439,8 @@ class _DashboardTabState extends State<_DashboardTab> {
               const SizedBox(width: 8),
               // Notification bell — shows unread order_placed badge for admin
               Obx(() {
-                final unread = Get.find<NotificationController>().unreadCount.value;
+                final unread =
+                    Get.find<NotificationController>().unreadCount.value;
                 return GestureDetector(
                   onTap: () => pushTo('/notifications'),
                   child: Stack(
@@ -381,10 +452,12 @@ class _DashboardTabState extends State<_DashboardTab> {
                         decoration: BoxDecoration(
                           color: AppColors.primary.withValues(alpha: 0.12),
                           shape: BoxShape.circle,
-                          border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+                          border: Border.all(
+                              color: AppColors.primary.withValues(alpha: 0.3)),
                         ),
                         alignment: Alignment.center,
-                        child: Icon(Icons.notifications_rounded, color: AppColors.primary, size: 18),
+                        child: Icon(Icons.notifications_rounded,
+                            color: AppColors.primary, size: 18),
                       ),
                       if (unread > 0)
                         Positioned(
@@ -392,12 +465,19 @@ class _DashboardTabState extends State<_DashboardTab> {
                           right: -3,
                           child: Container(
                             padding: const EdgeInsets.all(3),
-                            constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                            decoration: const BoxDecoration(color: Color(0xFFFF4757), shape: BoxShape.circle),
+                            constraints: const BoxConstraints(
+                                minWidth: 16, minHeight: 16),
+                            decoration: const BoxDecoration(
+                                color: Color(0xFFFF4757),
+                                shape: BoxShape.circle),
                             child: Text(
                               unread > 9 ? '9+' : '$unread',
                               textAlign: TextAlign.center,
-                              style: GoogleFonts.poppins(fontSize: 9, fontWeight: FontWeight.w700, color: Colors.white, height: 1),
+                              style: GoogleFonts.poppins(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                  height: 1),
                             ),
                           ),
                         ),
@@ -421,7 +501,9 @@ class _DashboardTabState extends State<_DashboardTab> {
                     ),
                     alignment: Alignment.center,
                     child: Icon(
-                      isDark ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
+                      isDark
+                          ? Icons.dark_mode_rounded
+                          : Icons.light_mode_rounded,
                       color: AppColors.warning,
                       size: 18,
                     ),
@@ -518,15 +600,178 @@ class _DashboardTabState extends State<_DashboardTab> {
         trend: '',
         up: true,
       ),
+      _StatData(
+        label: 'Today POS',
+        value: 'Ks ${_formatNumber(todayPosSales)}',
+        icon: Icons.point_of_sale_rounded,
+        gradient: const LinearGradient(
+            colors: [Color(0xFF00B894), Color(0xFF55EFC4)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight),
+        trend: '$todayPosCount sales',
+        up: true,
+      ),
+      _StatData(
+        label: 'Month POS',
+        value: 'Ks ${_formatNumber(monthPosSales)}',
+        icon: Icons.calendar_month_rounded,
+        gradient: const LinearGradient(
+            colors: [Color(0xFF6C63FF), Color(0xFF9C8FFF)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight),
+        trend: '$monthPosCount sales',
+        up: true,
+      ),
     ];
     return GridView.count(
-      crossAxisCount: Responsive.isDesktop(context) ? 4 : Responsive.isTablet(context) ? 3 : 2,
+      crossAxisCount: Responsive.isDesktop(context)
+          ? 5
+          : Responsive.isTablet(context)
+              ? 5
+              : 2,
       crossAxisSpacing: 12,
       mainAxisSpacing: 12,
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       childAspectRatio: 1.4,
       children: stats.map((s) => _StatCard(data: s)).toList(),
+    );
+  }
+
+  Widget _buildPosSummary(BuildContext context) {
+    final now = DateTime.now();
+    final month = DateFormat('MMMM yyyy').format(now);
+    final today = DateFormat('dd MMM yyyy').format(now);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Header row ────────────────────────────────────────────────────
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _sectionTitle('POS Sales'),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(month,
+                  style: GoogleFonts.poppins(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primary)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // ── Today vs Month cards ──────────────────────────────────────────
+        Row(
+          children: [
+            Expanded(
+              child: _PosSummaryCard(
+                label: 'Today',
+                subtitle: today,
+                amount: todayPosSales,
+                count: todayPosCount,
+                color: const Color(0xFF00B894),
+                icon: Icons.today_rounded,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _PosSummaryCard(
+                label: 'This Month',
+                subtitle: month,
+                amount: monthPosSales,
+                count: monthPosCount,
+                color: AppColors.primary,
+                icon: Icons.calendar_month_rounded,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // ── Recent POS transactions ───────────────────────────────────────
+        if (recentPosSales.isNotEmpty) ...[
+          Text('Recent POS Transactions',
+              style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textMedium)),
+          const SizedBox(height: 8),
+          ...recentPosSales.map((sale) => _buildPosSaleRow(sale)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPosSaleRow(Map<String, dynamic> sale) {
+    final id = (sale['id'] ?? '').toString();
+    final total = _parseDouble(sale['total']);
+    final method = (sale['paymentMethod'] ?? 'cash').toString().toUpperCase();
+    final cashier = (sale['cashierName'] ?? '').toString();
+    final dateStr = (sale['createdAt'] ?? '').toString();
+    final date = DateTime.tryParse(dateStr);
+    final timeStr = date != null ? DateFormat('HH:mm').format(date) : '';
+    final isRefund = (sale['type'] ?? '') == 'refund';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: isRefund
+                  ? AppColors.secondary.withValues(alpha: 0.1)
+                  : const Color(0xFF00B894).withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              isRefund ? Icons.undo_rounded : Icons.point_of_sale_rounded,
+              size: 16,
+              color: isRefund ? AppColors.secondary : const Color(0xFF00B894),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  id.length > 20 ? '...${id.substring(id.length - 12)}' : id,
+                  style: GoogleFonts.poppins(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary),
+                ),
+                Text(
+                  '$cashier · $method · $timeStr',
+                  style: GoogleFonts.poppins(
+                      fontSize: 10, color: AppColors.textMedium),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            fmtPrice(total),
+            style: GoogleFonts.poppins(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: isRefund ? AppColors.secondary : AppColors.primary),
+          ),
+        ],
+      ),
     );
   }
 
@@ -545,19 +790,30 @@ class _DashboardTabState extends State<_DashboardTab> {
   }
 
   Widget _buildRecentOrderItem(Map<String, dynamic> order) {
-    final status   = order['status'] ?? 'pending';
-    final orderNum = order['orderNumber'] ?? order['id']?.toString().substring(0, 8) ?? '';
-    final total    = _parseDouble(order['totalPrice']);
-    final rawAddr  = order['shippingAddress'];
-    final customer = (rawAddr is Map ? rawAddr['name'] : null)?.toString() ?? '';
+    final status = order['status'] ?? 'pending';
+    final orderNum =
+        order['orderNumber'] ?? order['id']?.toString().substring(0, 8) ?? '';
+    final total = _parseDouble(order['totalPrice']);
+    final rawAddr = order['shippingAddress'];
+    final customer =
+        (rawAddr is Map ? rawAddr['name'] : null)?.toString() ?? '';
 
     Color statusColor;
     switch (status.toLowerCase()) {
-      case 'delivered': statusColor = AppColors.success; break;
-      case 'shipped':   statusColor = const Color(0xFF8B5CF6); break;
-      case 'cancelled': statusColor = AppColors.error; break;
-      case 'processing': statusColor = AppColors.primary; break;
-      default:          statusColor = AppColors.warning;
+      case 'delivered':
+        statusColor = AppColors.success;
+        break;
+      case 'shipped':
+        statusColor = const Color(0xFF8B5CF6);
+        break;
+      case 'cancelled':
+        statusColor = AppColors.error;
+        break;
+      case 'processing':
+        statusColor = AppColors.primary;
+        break;
+      default:
+        statusColor = AppColors.warning;
     }
 
     return Container(
@@ -593,7 +849,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                         color: statusColor.withValues(alpha: 0.10),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: Icon(Icons.receipt_rounded, color: statusColor, size: 20),
+                      child: Icon(Icons.receipt_rounded,
+                          color: statusColor, size: 20),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -652,13 +909,14 @@ class _DashboardTabState extends State<_DashboardTab> {
   }
 
   Widget _buildTopProductItem(Map<String, dynamic> p) {
-    final name      = p['name'] ?? 'Unknown';
-    final sold      = _parseInt(p['sold']);
-    final price     = _parseDouble(p['price']);
+    final name = p['name'] ?? 'Unknown';
+    final sold = _parseInt(p['sold']);
+    final price = _parseDouble(p['price']);
     final thumbnail = UploadService.fixUrl(p['thumbnail'] ?? '');
-    final rank      = topProducts.indexOf(p) + 1;
-    final maxSold   = topProducts.isNotEmpty ? _parseInt(topProducts.first['sold']) : 1;
-    final progress  = maxSold > 0 ? (sold / maxSold).clamp(0.0, 1.0) : 0.0;
+    final rank = topProducts.indexOf(p) + 1;
+    final maxSold =
+        topProducts.isNotEmpty ? _parseInt(topProducts.first['sold']) : 1;
+    final progress = maxSold > 0 ? (sold / maxSold).clamp(0.0, 1.0) : 0.0;
 
     final rankColors = [
       const Color(0xFFFFB800),
@@ -711,7 +969,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                     width: 44,
                     height: 44,
                     fit: BoxFit.cover,
-                    errorWidget: (_, __, ___) => const _ProductPlaceholder(size: 44))
+                    errorWidget: (_, __, ___) =>
+                        const _ProductPlaceholder(size: 44))
                 : const _ProductPlaceholder(size: 44),
           ),
           const SizedBox(width: 12),
@@ -732,7 +991,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                   child: LinearProgressIndicator(
                     value: progress,
                     backgroundColor: AppColors.border,
-                    valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                    valueColor:
+                        AlwaysStoppedAnimation<Color>(AppColors.primary),
                     minHeight: 4,
                   ),
                 ),
@@ -760,8 +1020,7 @@ class _DashboardTabState extends State<_DashboardTab> {
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.error_outline_rounded,
-              color: AppColors.error, size: 48),
+          Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
           const SizedBox(height: 12),
           Text(_error!,
               textAlign: TextAlign.center,
@@ -891,8 +1150,7 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
                 fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-              icon: Icon(Icons.refresh_rounded,
-                  color: AppColors.textMedium),
+              icon: Icon(Icons.refresh_rounded, color: AppColors.textMedium),
               onPressed: _fetch),
         ],
       ),
@@ -920,12 +1178,10 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
         style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
         decoration: InputDecoration(
           hintText: 'Search products…',
-          prefixIcon:
-              Icon(Icons.search_rounded, color: AppColors.textMedium),
+          prefixIcon: Icon(Icons.search_rounded, color: AppColors.textMedium),
           suffixIcon: _searchCtrl.text.isNotEmpty
               ? IconButton(
-                  icon: Icon(Icons.clear_rounded,
-                      color: AppColors.textMedium),
+                  icon: Icon(Icons.clear_rounded, color: AppColors.textMedium),
                   onPressed: () {
                     _searchCtrl.clear();
                     _applyFilter('');
@@ -944,8 +1200,7 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
     if (_error != null) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.error_outline_rounded,
-              color: AppColors.error, size: 48),
+          Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
           const SizedBox(height: 12),
           Text(_error!,
               textAlign: TextAlign.center,
@@ -1074,12 +1329,9 @@ class _ProductListItem extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 void _showProductSheet(
     BuildContext context, ProductModel? product, VoidCallback onSaved) {
-  showModalBottomSheet(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
+  Navigator.of(context).push(MaterialPageRoute(
     builder: (_) => _ProductFormSheet(product: product, onSaved: onSaved),
-  );
+  ));
 }
 
 class _ProductFormSheet extends StatefulWidget {
@@ -1094,6 +1346,7 @@ class _ProductFormSheet extends StatefulWidget {
 class _ProductFormSheetState extends State<_ProductFormSheet> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
+  final _barcodeCtrl = TextEditingController();
   final _descCtrl = TextEditingController();
   final _priceCtrl = TextEditingController();
   final _cmpCtrl = TextEditingController();
@@ -1108,7 +1361,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
 
   // Image
   File? _imageFile;
-  Uint8List? _imageBytes; // bytes read immediately at pick time — survives cache eviction
+  Uint8List?
+      _imageBytes; // bytes read immediately at pick time — survives cache eviction
   String _imageUrl = '';
   bool _isUploadingImage = false;
 
@@ -1122,6 +1376,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
     final p = widget.product;
     if (p != null) {
       _nameCtrl.text = p.name;
+      _barcodeCtrl.text = p.barcode;
       _descCtrl.text = p.description;
       _priceCtrl.text = p.price.toString();
       _cmpCtrl.text = p.comparePrice.toString();
@@ -1139,6 +1394,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _barcodeCtrl.dispose();
     _descCtrl.dispose();
     _priceCtrl.dispose();
     _cmpCtrl.dispose();
@@ -1194,7 +1450,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
       final db = FirebaseFirestore.instance;
 
       // Upload image on submit if a new file was picked
-      String finalImageUrl = _imageUrl.isNotEmpty ? _imageUrl : _manualUrlCtrl.text.trim();
+      String finalImageUrl =
+          _imageUrl.isNotEmpty ? _imageUrl : _manualUrlCtrl.text.trim();
       if (_imageBytes != null) {
         setState(() => _isUploadingImage = true);
         try {
@@ -1235,6 +1492,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
 
       final payload = <String, dynamic>{
         'name': _nameCtrl.text.trim(),
+        'barcode': _barcodeCtrl.text.trim(),
         'description': _descCtrl.text.trim(),
         'price': double.tryParse(_priceCtrl.text) ?? 0.0,
         'comparePrice': double.tryParse(_cmpCtrl.text) ?? 0.0,
@@ -1277,136 +1535,163 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.93,
-      minChildSize: 0.5,
-      maxChildSize: 0.97,
-      builder: (_, controller) => Container(
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    return Scaffold(
+      backgroundColor: AppColors.card,
+      appBar: AppBar(
+        backgroundColor: AppColors.card,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
+          onPressed: () => Navigator.of(context).pop(),
         ),
-        child: Column(
-          children: [
-            _SheetHandle(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    widget.product == null ? 'Add Product' : 'Edit Product',
-                    style: GoogleFonts.poppins(
-                        color: AppColors.textPrimary,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700),
-                  ),
-                  IconButton(
-                      icon: Icon(Icons.close_rounded,
-                          color: AppColors.textMedium),
-                      onPressed: () => Navigator.of(context).pop()),
-                ],
-              ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                controller: controller,
-                padding: EdgeInsets.fromLTRB(
-                    20, 0, 20, MediaQuery.of(context).viewInsets.bottom + 20),
+        title: Text(
+          widget.product == null ? 'Add Product' : 'Edit Product',
+          style: GoogleFonts.poppins(
+              color: AppColors.textPrimary,
+              fontSize: 18,
+              fontWeight: FontWeight.w700),
+        ),
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final isTablet = constraints.maxWidth >= 700;
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+                24, 12, 24, MediaQuery.of(context).viewInsets.bottom + 24),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 960),
                 child: Form(
                   key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 16),
-                      // Image picker
-                      _buildImagePicker(),
-                      const SizedBox(height: 16),
-                      _Field(
-                          ctrl: _nameCtrl,
-                          label: 'Product Name *',
-                          validator: (v) =>
-                              (v == null || v.isEmpty) ? 'Required' : null),
-                      const SizedBox(height: 14),
-                      _Field(
-                          ctrl: _descCtrl, label: 'Description', maxLines: 3),
-                      const SizedBox(height: 14),
-                      Row(children: [
-                        Expanded(
-                          child: _Field(
-                              ctrl: _priceCtrl,
-                              label: 'Price *',
-                              keyboardType: TextInputType.number,
-                              validator: (v) =>
-                                  (v == null || v.isEmpty) ? 'Required' : null),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _Field(
-                              ctrl: _cmpCtrl,
-                              label: 'Compare Price',
-                              keyboardType: TextInputType.number),
-                        ),
-                      ]),
-                      const SizedBox(height: 14),
-                      Row(children: [
-                        Expanded(
-                          child: _Field(
-                              ctrl: _stockCtrl,
-                              label: 'Stock',
-                              keyboardType: TextInputType.number),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _Field(
-                              ctrl: _discCtrl,
-                              label: 'Discount %',
-                              keyboardType: TextInputType.number),
-                        ),
-                      ]),
-                      const SizedBox(height: 14),
-                      _buildCategoryDropdown(),
-                      const SizedBox(height: 14),
-                      _Field(
-                          ctrl: _sizesCtrl,
-                          label: 'Sizes',
-                          hint: 'e.g. S,M,L,XL or 31,32,33,34'),
-                      const SizedBox(height: 14),
-                      _Field(
-                          ctrl: _colorsCtrl,
-                          label: 'Colors',
-                          hint: 'e.g. Red,Blue,Green'),
-                      const SizedBox(height: 14),
-                      _buildFeaturedToggle(),
-                      const SizedBox(height: 24),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: (_isLoading || _isUploadingImage)
-                              ? null
-                              : _submit,
-                          child: _isLoading
-                              ? const SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: CircularProgressIndicator(
-                                      color: Colors.white, strokeWidth: 2))
-                              : Text(widget.product == null
-                                  ? 'Add Product'
-                                  : 'Update Product'),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                    ],
-                  ),
+                  child: isTablet ? _buildTabletLayout() : _buildPhoneLayout(),
                 ),
               ),
             ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
+
+  Widget _buildFormFields() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _Field(
+              ctrl: _nameCtrl,
+              label: 'Product Name *',
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null),
+          const SizedBox(height: 14),
+          _BarcodeInputField(ctrl: _barcodeCtrl),
+          const SizedBox(height: 14),
+          _Field(ctrl: _descCtrl, label: 'Description', maxLines: 3),
+          const SizedBox(height: 14),
+          Row(children: [
+            Expanded(
+              child: _Field(
+                  ctrl: _priceCtrl,
+                  label: 'Price *',
+                  keyboardType: TextInputType.number,
+                  validator: (v) =>
+                      (v == null || v.isEmpty) ? 'Required' : null),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _Field(
+                  ctrl: _cmpCtrl,
+                  label: 'Compare Price',
+                  keyboardType: TextInputType.number),
+            ),
+          ]),
+          const SizedBox(height: 14),
+          Row(children: [
+            Expanded(
+              child: _Field(
+                  ctrl: _stockCtrl,
+                  label: 'Stock',
+                  keyboardType: TextInputType.number),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _Field(
+                  ctrl: _discCtrl,
+                  label: 'Discount %',
+                  keyboardType: TextInputType.number),
+            ),
+          ]),
+          const SizedBox(height: 14),
+          _buildCategoryDropdown(),
+          const SizedBox(height: 14),
+          _Field(
+              ctrl: _sizesCtrl,
+              label: 'Sizes',
+              hint: 'e.g. S,M,L,XL or 31,32,33,34'),
+          const SizedBox(height: 14),
+          _Field(
+              ctrl: _colorsCtrl, label: 'Colors', hint: 'e.g. Red,Blue,Green'),
+          const SizedBox(height: 14),
+          _buildFeaturedToggle(),
+        ],
+      );
+
+  Widget _buildSubmitButton() => SizedBox(
+        width: double.infinity,
+        child: ElevatedButton(
+          onPressed: (_isLoading || _isUploadingImage) ? null : _submit,
+          child: _isLoading
+              ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                      color: Colors.white, strokeWidth: 2))
+              : Text(widget.product == null ? 'Add Product' : 'Update Product'),
+        ),
+      );
+
+  // ── Phone: single column ───────────────────────────────────────────────────
+  Widget _buildPhoneLayout() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 8),
+          _buildImagePicker(),
+          const SizedBox(height: 16),
+          _buildFormFields(),
+          const SizedBox(height: 24),
+          _buildSubmitButton(),
+          const SizedBox(height: 20),
+        ],
+      );
+
+  // ── Tablet: image left, fields right ─────────────────────────────────────
+  Widget _buildTabletLayout() => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Left: image picker (fixed width)
+          SizedBox(
+            width: 320,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 8),
+                _buildImagePicker(),
+              ],
+            ),
+          ),
+          const SizedBox(width: 28),
+          // Right: all form fields
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 8),
+                _buildFormFields(),
+                const SizedBox(height: 24),
+                _buildSubmitButton(),
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        ],
+      );
 
   Widget _buildImagePicker() {
     // Effective preview URL: auto-upload wins, manual URL is fallback
@@ -1512,8 +1797,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           if (_isUploadingImage) ...[
             const SizedBox(height: 6),
             LinearProgressIndicator(
-                color: AppColors.primary,
-                backgroundColor: AppColors.surface),
+                color: AppColors.primary, backgroundColor: AppColors.surface),
             const SizedBox(height: 4),
             Text('Uploading to server…',
                 style: GoogleFonts.poppins(
@@ -1595,7 +1879,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
                   color: AppColors.textMedium, fontSize: 14)),
           isExpanded: true,
           dropdownColor: AppColors.surface,
-          style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
+          style:
+              GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
           icon: Icon(Icons.keyboard_arrow_down_rounded,
               color: AppColors.textMedium),
           items: [
@@ -1617,8 +1902,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text('Featured Product',
-            style:
-                GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14)),
+            style: GoogleFonts.poppins(
+                color: AppColors.textPrimary, fontSize: 14)),
         Switch(
           value: _isFeatured,
           onChanged: (v) => setState(() => _isFeatured = v),
@@ -1771,17 +2056,18 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
     }
   }
 
-  Future<void> _notifyCustomerStatusChange(OrderModel order, String newStatus) async {
+  Future<void> _notifyCustomerStatusChange(
+      OrderModel order, String newStatus) async {
     final statusMessages = {
-      'pending':    'Your order #${order.orderNumber} has been received.',
-      'confirmed':  'Your order #${order.orderNumber} has been confirmed! ✅',
+      'pending': 'Your order #${order.orderNumber} has been received.',
+      'confirmed': 'Your order #${order.orderNumber} has been confirmed! ✅',
       'processing': 'Your order #${order.orderNumber} is being processed. 📦',
-      'shipped':    'Your order #${order.orderNumber} is on the way! 🚚',
-      'delivered':  'Your order #${order.orderNumber} has been delivered! 🎉',
-      'cancelled':  'Your order #${order.orderNumber} has been cancelled.',
+      'shipped': 'Your order #${order.orderNumber} is on the way! 🚚',
+      'delivered': 'Your order #${order.orderNumber} has been delivered! 🎉',
+      'cancelled': 'Your order #${order.orderNumber} has been cancelled.',
     };
-    final body = statusMessages[newStatus.toLowerCase()]
-        ?? 'Your order #${order.orderNumber} status: $newStatus';
+    final body = statusMessages[newStatus.toLowerCase()] ??
+        'Your order #${order.orderNumber} status: $newStatus';
 
     try {
       final token = await AuthService().getIdToken();
@@ -1839,8 +2125,7 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
                 fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-              icon: Icon(Icons.refresh_rounded,
-                  color: AppColors.textMedium),
+              icon: Icon(Icons.refresh_rounded, color: AppColors.textMedium),
               onPressed: _subscribe),
         ],
       ),
@@ -1866,11 +2151,14 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
         style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
         decoration: InputDecoration(
           hintText: 'Search by order ID or name…',
-          hintStyle: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
-          prefixIcon: Icon(Icons.search_rounded, color: AppColors.textMedium, size: 20),
+          hintStyle:
+              GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
+          prefixIcon:
+              Icon(Icons.search_rounded, color: AppColors.textMedium, size: 20),
           suffixIcon: _searchCtrl.text.isNotEmpty
               ? IconButton(
-                  icon: Icon(Icons.clear_rounded, color: AppColors.textMedium, size: 18),
+                  icon: Icon(Icons.clear_rounded,
+                      color: AppColors.textMedium, size: 18),
                   onPressed: () {
                     _searchCtrl.clear();
                     _searchQuery = '';
@@ -1906,8 +2194,7 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
                 color: isSelected ? null : AppColors.card,
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                    color:
-                        isSelected ? Colors.transparent : AppColors.border),
+                    color: isSelected ? Colors.transparent : AppColors.border),
               ),
               alignment: Alignment.center,
               child: Text(_capitalize(s),
@@ -1931,8 +2218,7 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
     if (_error != null) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.error_outline_rounded,
-              color: AppColors.error, size: 48),
+          Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
           const SizedBox(height: 12),
           Text(_error!,
               textAlign: TextAlign.center,
@@ -2013,7 +2299,9 @@ class _OrderAdminCard extends StatelessWidget {
                           fontWeight: FontWeight.w600),
                     ),
                     const SizedBox(height: 2),
-                    if ((order.shippingAddress['name'] ?? '').toString().isNotEmpty)
+                    if ((order.shippingAddress['name'] ?? '')
+                        .toString()
+                        .isNotEmpty)
                       Text(
                         order.shippingAddress['name'].toString(),
                         style: GoogleFonts.poppins(
@@ -2172,9 +2460,7 @@ class _OrderDetailSheetState extends State<_OrderDetailSheet> {
                   _DetailRow(
                       label: 'Payment',
                       value: _capitalize(order.paymentStatus)),
-                  _DetailRow(
-                      label: 'Total',
-                      value: '${fmtPrice(order.totalPrice)}'),
+                  _DetailRow(label: 'Total', value: fmtPrice(order.totalPrice)),
                   if (order.createdAt != null)
                     _DetailRow(
                         label: 'Date',
@@ -2195,13 +2481,27 @@ class _OrderDetailSheetState extends State<_OrderDetailSheet> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if ((order.shippingAddress['name'] ?? '').toString().isNotEmpty)
-                          _DetailRow(label: 'Name', value: order.shippingAddress['name'].toString()),
-                        if ((order.shippingAddress['phone'] ?? '').toString().isNotEmpty)
-                          _DetailRow(label: 'Phone', value: order.shippingAddress['phone'].toString()),
-                        if ((order.shippingAddress['street'] ?? '').toString().isNotEmpty)
-                          _DetailRow(label: 'Street', value: order.shippingAddress['street'].toString()),
-                        _DetailRow(label: 'Payment', value: order.paymentMethod),
+                        if ((order.shippingAddress['name'] ?? '')
+                            .toString()
+                            .isNotEmpty)
+                          _DetailRow(
+                              label: 'Name',
+                              value: order.shippingAddress['name'].toString()),
+                        if ((order.shippingAddress['phone'] ?? '')
+                            .toString()
+                            .isNotEmpty)
+                          _DetailRow(
+                              label: 'Phone',
+                              value: order.shippingAddress['phone'].toString()),
+                        if ((order.shippingAddress['street'] ?? '')
+                            .toString()
+                            .isNotEmpty)
+                          _DetailRow(
+                              label: 'Street',
+                              value:
+                                  order.shippingAddress['street'].toString()),
+                        _DetailRow(
+                            label: 'Payment', value: order.paymentMethod),
                       ],
                     ),
                   ),
@@ -2227,12 +2527,16 @@ class _OrderDetailSheetState extends State<_OrderDetailSheet> {
                             Marker(
                               markerId: const MarkerId('delivery'),
                               position: LatLng(
-                                (order.shippingAddress['lat'] as num).toDouble(),
-                                (order.shippingAddress['lng'] as num).toDouble(),
+                                (order.shippingAddress['lat'] as num)
+                                    .toDouble(),
+                                (order.shippingAddress['lng'] as num)
+                                    .toDouble(),
                               ),
                               infoWindow: InfoWindow(
-                                title: (order.shippingAddress['name'] ?? '').toString(),
-                                snippet: (order.shippingAddress['street'] ?? '').toString(),
+                                title: (order.shippingAddress['name'] ?? '')
+                                    .toString(),
+                                snippet: (order.shippingAddress['street'] ?? '')
+                                    .toString(),
                               ),
                             ),
                           },
@@ -2292,7 +2596,7 @@ class _OrderDetailSheetState extends State<_OrderDetailSheet> {
                                             fontSize: 12)),
                                   ]),
                             ),
-                            Text('${fmtPrice(item.subtotal)}',
+                            Text(fmtPrice(item.subtotal),
                                 style: GoogleFonts.poppins(
                                     color: AppColors.accent,
                                     fontSize: 13,
@@ -2342,7 +2646,8 @@ class _PaymentMethodBadge extends StatelessWidget {
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      decoration:
+          BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         if (assetIcon != null)
           Image.asset(assetIcon, width: 16, height: 16)
@@ -2442,8 +2747,7 @@ class _AdminUsersTabState extends State<_AdminUsersTab> {
                 fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-              icon: Icon(Icons.refresh_rounded,
-                  color: AppColors.textMedium),
+              icon: Icon(Icons.refresh_rounded, color: AppColors.textMedium),
               onPressed: _fetch),
         ],
       ),
@@ -2454,12 +2758,12 @@ class _AdminUsersTabState extends State<_AdminUsersTab> {
             child: TextField(
               controller: _searchCtrl,
               onChanged: _applyFilter,
-              style:
-                  GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
+              style: GoogleFonts.poppins(
+                  color: AppColors.textPrimary, fontSize: 14),
               decoration: InputDecoration(
                 hintText: 'Search by name or email…',
-                prefixIcon: Icon(Icons.search_rounded,
-                    color: AppColors.textMedium),
+                prefixIcon:
+                    Icon(Icons.search_rounded, color: AppColors.textMedium),
                 suffixIcon: _searchCtrl.text.isNotEmpty
                     ? IconButton(
                         icon: Icon(Icons.clear_rounded,
@@ -2486,8 +2790,7 @@ class _AdminUsersTabState extends State<_AdminUsersTab> {
     if (_error != null) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.error_outline_rounded,
-              color: AppColors.error, size: 48),
+          Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
           const SizedBox(height: 12),
           Text(_error!,
               textAlign: TextAlign.center,
@@ -2618,9 +2921,7 @@ class _UserCard extends StatelessWidget {
                 width: 10,
                 height: 10,
                 decoration: BoxDecoration(
-                    color: user.isOnline
-                        ? AppColors.success
-                        : AppColors.border,
+                    color: user.isOnline ? AppColors.success : AppColors.border,
                     shape: BoxShape.circle),
               ),
               const SizedBox(height: 6),
@@ -2868,8 +3169,7 @@ class _AdminCategoriesTabState extends State<_AdminCategoriesTab> {
                 fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-              icon: Icon(Icons.refresh_rounded,
-                  color: AppColors.textMedium),
+              icon: Icon(Icons.refresh_rounded, color: AppColors.textMedium),
               onPressed: _fetch),
         ],
       ),
@@ -2891,8 +3191,7 @@ class _AdminCategoriesTabState extends State<_AdminCategoriesTab> {
     if (_error != null) {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.error_outline_rounded,
-              color: AppColors.error, size: 48),
+          Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
           const SizedBox(height: 12),
           Text(_error!,
               textAlign: TextAlign.center,
@@ -3654,6 +3953,93 @@ class _RoleBadge extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POS Summary Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PosSummaryCard extends StatelessWidget {
+  final String label;
+  final String subtitle;
+  final double amount;
+  final int count;
+  final Color color;
+  final IconData icon;
+
+  const _PosSummaryCard({
+    required this.label,
+    required this.subtitle,
+    required this.amount,
+    required this.count,
+    required this.color,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: 0.08),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, size: 18, color: color),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label,
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textMedium)),
+                    Text(subtitle,
+                        style: GoogleFonts.poppins(
+                            fontSize: 10, color: AppColors.textLight),
+                        overflow: TextOverflow.ellipsis),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            fmtPrice(amount),
+            style: GoogleFonts.poppins(
+                fontSize: 18, fontWeight: FontWeight.w800, color: color),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '$count transaction${count == 1 ? '' : 's'}',
+            style:
+                GoogleFonts.poppins(fontSize: 11, color: AppColors.textMedium),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -3683,8 +4069,7 @@ class _SheetHandle extends StatelessWidget {
           width: 40,
           height: 4,
           decoration: BoxDecoration(
-              color: AppColors.border,
-              borderRadius: BorderRadius.circular(2)),
+              color: AppColors.border, borderRadius: BorderRadius.circular(2)),
         ),
       ),
     );
@@ -3701,8 +4086,7 @@ class _ProductPlaceholder extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(10)),
+          color: AppColors.surface, borderRadius: BorderRadius.circular(10)),
       alignment: Alignment.center,
       child: Icon(Icons.image_rounded,
           color: AppColors.textMedium, size: size * 0.4),
@@ -3717,13 +4101,15 @@ class _Field extends StatelessWidget {
   final int maxLines;
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
+  final IconData? prefixIcon;
   const _Field(
       {required this.ctrl,
       required this.label,
       this.hint,
       this.maxLines = 1,
       this.keyboardType,
-      this.validator});
+      this.validator,
+      this.prefixIcon});
 
   @override
   Widget build(BuildContext context) {
@@ -3733,7 +4119,100 @@ class _Field extends StatelessWidget {
       keyboardType: keyboardType,
       validator: validator,
       style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
-      decoration: InputDecoration(labelText: label, hintText: hint),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        prefixIcon: prefixIcon != null ? Icon(prefixIcon, size: 18) : null,
+      ),
+    );
+  }
+}
+
+class _BarcodeInputField extends StatefulWidget {
+  final TextEditingController ctrl;
+  const _BarcodeInputField({required this.ctrl});
+
+  @override
+  State<_BarcodeInputField> createState() => _BarcodeInputFieldState();
+}
+
+class _BarcodeInputFieldState extends State<_BarcodeInputField> {
+  final _focus = FocusNode();
+  final _beep = AudioPlayer();
+  bool _scanning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(_onFocusChange);
+  }
+
+  @override
+  void dispose() {
+    _focus.removeListener(_onFocusChange);
+    // Release callback ownership when widget is removed
+    if (!kIsWeb && Get.isRegistered<BarcodeScannerService>()) {
+      if (BarcodeScannerService.to.onBarcodeReceived != null) {
+        BarcodeScannerService.to.onBarcodeReceived = null;
+      }
+    }
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _onFocusChange() {
+    if (!mounted) return;
+    if (_focus.hasFocus) {
+      // Claim the network scanner when this field is active
+      if (!kIsWeb && Get.isRegistered<BarcodeScannerService>()) {
+        BarcodeScannerService.to.onBarcodeReceived = (barcode) {
+          if (mounted) {
+            widget.ctrl.text = barcode;
+            widget.ctrl.selection =
+                TextSelection.collapsed(offset: barcode.length);
+          }
+        };
+      }
+      setState(() => _scanning = true);
+    } else {
+      // Release the callback so POS can reclaim it
+      if (!kIsWeb && Get.isRegistered<BarcodeScannerService>()) {
+        BarcodeScannerService.to.onBarcodeReceived = null;
+      }
+      setState(() => _scanning = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextFormField(
+      controller: widget.ctrl,
+      focusNode: _focus,
+      // Next prevents Enter from accidentally submitting the form
+      textInputAction: TextInputAction.next,
+      keyboardType: TextInputType.text,
+      style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
+      decoration: InputDecoration(
+        labelText: 'Barcode',
+        hintText: 'Scan or type barcode',
+        prefixIcon: Icon(
+          Icons.qr_code_scanner_rounded,
+          size: 18,
+          color: _scanning ? AppColors.primary : null,
+        ),
+        suffixIcon: _scanning
+            ? Padding(
+                padding: const EdgeInsets.all(12),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AppColors.primary),
+                ),
+              )
+            : null,
+        labelStyle: _scanning ? TextStyle(color: AppColors.primary) : null,
+      ),
     );
   }
 }
@@ -4023,8 +4502,7 @@ class _AdminNotificationsTabState extends State<_AdminNotificationsTab> {
                                   backgroundColor:
                                       AppColors.primary.withValues(alpha: 0.15),
                                   child: Text(
-                                    (u['name'] as String)
-                                        .isNotEmpty
+                                    (u['name'] as String).isNotEmpty
                                         ? (u['name'] as String)[0].toUpperCase()
                                         : '?',
                                     style: GoogleFonts.poppins(
@@ -4090,7 +4568,8 @@ class _AdminNotificationsTabState extends State<_AdminNotificationsTab> {
               const SizedBox(height: 8),
               // ── Diagnostics card ─────────────────────────────────────
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 decoration: BoxDecoration(
                   color: AppColors.card,
                   borderRadius: BorderRadius.circular(14),
@@ -4165,8 +4644,9 @@ class _AdminNotificationsTabState extends State<_AdminNotificationsTab> {
                   hintStyle: GoogleFonts.poppins(
                       color: AppColors.textMedium, fontSize: 14),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Title is required' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'Title is required'
+                    : null,
               ),
               const SizedBox(height: 16),
               // ── Message ──────────────────────────────────────────────
@@ -4186,8 +4666,9 @@ class _AdminNotificationsTabState extends State<_AdminNotificationsTab> {
                   hintStyle: GoogleFonts.poppins(
                       color: AppColors.textMedium, fontSize: 14),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Message is required' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'Message is required'
+                    : null,
               ),
               const SizedBox(height: 20),
               // ── Target ───────────────────────────────────────────────
@@ -4391,11 +4872,11 @@ class _AdminPaymentsTab extends StatefulWidget {
 class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
     with SingleTickerProviderStateMixin {
   late TabController _tabCtrl;
-  final _noteCtrl        = TextEditingController();
-  final _kpayNumCtrl     = TextEditingController();
-  final _kpayNameCtrl    = TextEditingController();
-  final _waveNumCtrl     = TextEditingController();
-  final _waveNameCtrl    = TextEditingController();
+  final _noteCtrl = TextEditingController();
+  final _kpayNumCtrl = TextEditingController();
+  final _kpayNameCtrl = TextEditingController();
+  final _waveNumCtrl = TextEditingController();
+  final _waveNameCtrl = TextEditingController();
   final _mandalayFeeCtrl = TextEditingController();
 
   static const _statuses = ['pending', 'approved', 'rejected'];
@@ -4420,10 +4901,10 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
 
   Future<void> _showAccountSettingsSheet() async {
     final current = await PaymentService().accountSettingsStream().first;
-    _kpayNumCtrl.text  = current['kpayNumber'] ?? '';
-    _kpayNameCtrl.text = current['kpayName']   ?? '';
-    _waveNumCtrl.text  = current['waveNumber'] ?? '';
-    _waveNameCtrl.text = current['waveName']   ?? '';
+    _kpayNumCtrl.text = current['kpayNumber'] ?? '';
+    _kpayNameCtrl.text = current['kpayName'] ?? '';
+    _waveNumCtrl.text = current['waveNumber'] ?? '';
+    _waveNameCtrl.text = current['waveName'] ?? '';
     if (!mounted) return;
 
     bool saving = false;
@@ -4442,7 +4923,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
             // Handle
             Center(
               child: Container(
-                width: 40, height: 4,
+                width: 40,
+                height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
                     color: AppColors.border,
@@ -4467,7 +4949,7 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
               label: 'KPay',
               color: const Color(0xFFE5007E),
               nameCtrl: _kpayNameCtrl,
-              numCtrl:  _kpayNumCtrl,
+              numCtrl: _kpayNumCtrl,
             ),
             const SizedBox(height: 16),
 
@@ -4476,7 +4958,7 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
               label: 'Wave Money',
               color: const Color(0xFF003087),
               nameCtrl: _waveNameCtrl,
-              numCtrl:  _waveNumCtrl,
+              numCtrl: _waveNumCtrl,
             ),
             const SizedBox(height: 24),
 
@@ -4491,12 +4973,14 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                         try {
                           await PaymentService().saveAccountSettings(
                             kpayNumber: _kpayNumCtrl.text,
-                            kpayName:   _kpayNameCtrl.text,
+                            kpayName: _kpayNameCtrl.text,
                             waveNumber: _waveNumCtrl.text,
-                            waveName:   _waveNameCtrl.text,
+                            waveName: _waveNameCtrl.text,
                           );
                           if (ctx.mounted) Navigator.pop(ctx);
-                          if (mounted) _snack('Account numbers saved ✅', AppColors.success);
+                          if (mounted)
+                            _snack(
+                                'Account numbers saved ✅', AppColors.success);
                         } catch (e) {
                           setSheet(() => saving = false);
                           if (mounted) _snack(e.toString(), AppColors.error);
@@ -4509,7 +4993,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                 ),
                 child: saving
                     ? const SizedBox(
-                        width: 20, height: 20,
+                        width: 20,
+                        height: 20,
                         child: CircularProgressIndicator(
                             color: Colors.white, strokeWidth: 2))
                     : Text('Save',
@@ -4545,7 +5030,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Center(
               child: Container(
-                width: 40, height: 4,
+                width: 40,
+                height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
                     color: AppColors.border,
@@ -4564,7 +5050,6 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                   onPressed: () => Navigator.pop(ctx)),
             ]),
             const SizedBox(height: 16),
-
             _DeliveryFeeField(
               label: 'Mandalay City Fee (Ks)',
               hint: 'e.g. 3000',
@@ -4580,7 +5065,6 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
               ),
             ),
             const SizedBox(height: 20),
-
             SizedBox(
               width: double.infinity,
               height: 50,
@@ -4588,16 +5072,19 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                 onPressed: saving
                     ? null
                     : () async {
-                        final fee = double.tryParse(_mandalayFeeCtrl.text.trim());
+                        final fee =
+                            double.tryParse(_mandalayFeeCtrl.text.trim());
                         if (fee == null) {
-                          if (mounted) _snack('Enter a valid number', AppColors.error);
+                          if (mounted)
+                            _snack('Enter a valid number', AppColors.error);
                           return;
                         }
                         setSheet(() => saving = true);
                         try {
                           await PaymentService().saveMandalayFee(fee);
                           if (ctx.mounted) Navigator.pop(ctx);
-                          if (mounted) _snack('Delivery fee saved ✅', AppColors.success);
+                          if (mounted)
+                            _snack('Delivery fee saved ✅', AppColors.success);
                         } catch (e) {
                           setSheet(() => saving = false);
                           if (mounted) _snack(e.toString(), AppColors.error);
@@ -4610,7 +5097,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                 ),
                 child: saving
                     ? const SizedBox(
-                        width: 20, height: 20,
+                        width: 20,
+                        height: 20,
                         child: CircularProgressIndicator(
                             color: Colors.white, strokeWidth: 2))
                     : Text('Save',
@@ -4665,13 +5153,14 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
 
   Future<void> _approve(String paymentId) async {
     _noteCtrl.clear();
-    final confirm = await _showNoteDialog('Approve Payment', confirmLabel: 'Approve');
+    final confirm =
+        await _showNoteDialog('Approve Payment', confirmLabel: 'Approve');
     if (!confirm) return;
     try {
       final token = await AuthService().getIdToken();
       if (token == null) return;
-      await PaymentService().approvePayment(paymentId, token,
-          adminNote: _noteCtrl.text.trim());
+      await PaymentService()
+          .approvePayment(paymentId, token, adminNote: _noteCtrl.text.trim());
       if (mounted) _snack('Payment approved ✅', AppColors.success);
     } catch (e) {
       if (mounted) _snack(e.toString(), AppColors.error);
@@ -4681,14 +5170,15 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
   Future<void> _reject(String paymentId) async {
     _noteCtrl.clear();
     final confirm = await _showNoteDialog('Reject Payment',
-        hint: 'Reason for rejection (required)', confirmLabel: 'Reject',
+        hint: 'Reason for rejection (required)',
+        confirmLabel: 'Reject',
         confirmColor: AppColors.error);
     if (!confirm) return;
     try {
       final token = await AuthService().getIdToken();
       if (token == null) return;
-      await PaymentService().rejectPayment(paymentId, token,
-          adminNote: _noteCtrl.text.trim());
+      await PaymentService()
+          .rejectPayment(paymentId, token, adminNote: _noteCtrl.text.trim());
       if (mounted) _snack('Payment rejected', AppColors.error);
     } catch (e) {
       if (mounted) _snack(e.toString(), AppColors.error);
@@ -4696,8 +5186,9 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
   }
 
   Future<bool> _showNoteDialog(String title,
-      {String hint = 'Optional note', String confirmLabel = 'Confirm',
-       Color? confirmColor}) async {
+      {String hint = 'Optional note',
+      String confirmLabel = 'Confirm',
+      Color? confirmColor}) async {
     final result = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -4710,7 +5201,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                 fontWeight: FontWeight.w600)),
         content: TextField(
           controller: _noteCtrl,
-          style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 13),
+          style:
+              GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 13),
           decoration: InputDecoration(
             hintText: hint,
             hintStyle:
@@ -4739,8 +5231,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
 
   void _snack(String msg, Color color) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content:
-          Text(msg, style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
+      content: Text(msg,
+          style: GoogleFonts.poppins(color: Colors.white, fontSize: 13)),
       backgroundColor: color,
       behavior: SnackBarBehavior.floating,
     ));
@@ -4764,7 +5256,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
             ),
           ),
           Positioned(
-            top: 8, right: 8,
+            top: 8,
+            right: 8,
             child: IconButton(
               icon: const Icon(Icons.close_rounded, color: Colors.white),
               onPressed: () => Navigator.pop(context),
@@ -4789,7 +5282,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
                 fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-            icon: Icon(Icons.local_shipping_outlined, color: AppColors.textMedium),
+            icon: Icon(Icons.local_shipping_outlined,
+                color: AppColors.textMedium),
             tooltip: 'Delivery Fee',
             onPressed: _showDeliveryFeeSheet,
           ),
@@ -4805,8 +5299,8 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
           unselectedLabelColor: AppColors.textMedium,
           indicatorColor: AppColors.primary,
           indicatorSize: TabBarIndicatorSize.label,
-          labelStyle: GoogleFonts.poppins(
-              fontSize: 13, fontWeight: FontWeight.w600),
+          labelStyle:
+              GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w600),
           unselectedLabelStyle: GoogleFonts.poppins(fontSize: 13),
           tabs: const [
             Tab(text: 'Pending'),
@@ -4850,7 +5344,8 @@ class _AccountSettingsSection extends StatelessWidget {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         Container(
-          width: 10, height: 10,
+          width: 10,
+          height: 10,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         const SizedBox(width: 8),
@@ -4864,8 +5359,10 @@ class _AccountSettingsSection extends StatelessWidget {
         style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 13),
         decoration: InputDecoration(
           labelText: 'Account Name',
-          labelStyle: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
-          prefixIcon: Icon(Icons.person_outline_rounded, color: AppColors.textMedium, size: 18),
+          labelStyle:
+              GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
+          prefixIcon: Icon(Icons.person_outline_rounded,
+              color: AppColors.textMedium, size: 18),
         ),
       ),
       const SizedBox(height: 8),
@@ -4875,7 +5372,8 @@ class _AccountSettingsSection extends StatelessWidget {
         style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 13),
         decoration: InputDecoration(
           labelText: 'Phone Number',
-          labelStyle: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
+          labelStyle:
+              GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
           prefixIcon: Icon(Icons.phone_rounded, color: color, size: 18),
         ),
       ),
@@ -4902,9 +5400,12 @@ class _DeliveryFeeField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
-        labelStyle: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
-        hintStyle: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
-        prefixIcon: Icon(Icons.local_shipping_outlined, color: AppColors.textMedium, size: 18),
+        labelStyle:
+            GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
+        hintStyle:
+            GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13),
+        prefixIcon: Icon(Icons.local_shipping_outlined,
+            color: AppColors.textMedium, size: 18),
       ),
     );
   }
@@ -4991,8 +5492,9 @@ class _PaymentCard extends StatelessWidget {
         : p.isRejected
             ? AppColors.error
             : AppColors.warning;
-    final methodColor =
-        p.paymentMethod == 'KPay' ? const Color(0xFFE5007E) : const Color(0xFF003087);
+    final methodColor = p.paymentMethod == 'KPay'
+        ? const Color(0xFFE5007E)
+        : const Color(0xFF003087);
 
     return Container(
       decoration: BoxDecoration(
@@ -5007,8 +5509,7 @@ class _PaymentCard extends StatelessWidget {
           child: Row(children: [
             // Method badge
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                   color: methodColor.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(8)),
@@ -5030,8 +5531,7 @@ class _PaymentCard extends StatelessWidget {
             ),
             // Status badge
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                   color: statusColor.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(8)),
@@ -5046,9 +5546,8 @@ class _PaymentCard extends StatelessWidget {
         // ── Details ──────────────────────────────────────────────────────
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             if (p.orderId != null)
               Text('Order: ${p.orderId}',
                   style: GoogleFonts.poppins(
@@ -5084,12 +5583,14 @@ class _PaymentCard extends StatelessWidget {
                 width: double.infinity,
                 fit: BoxFit.cover,
                 placeholder: (_, __) => Container(
-                    height: 160, color: AppColors.surface,
+                    height: 160,
+                    color: AppColors.surface,
                     child: const Center(
                         child: CircularProgressIndicator(
                             color: AppColors.primary, strokeWidth: 2))),
                 errorWidget: (_, __, ___) => Container(
-                    height: 80, color: AppColors.surface,
+                    height: 80,
+                    color: AppColors.surface,
                     child: Center(
                         child: Icon(Icons.image_not_supported_outlined,
                             color: AppColors.textMedium))),
@@ -5113,7 +5614,8 @@ class _PaymentCard extends StatelessWidget {
                             fontSize: 13, fontWeight: FontWeight.w600)),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.error,
-                      side: BorderSide(color: AppColors.error.withValues(alpha: 0.4)),
+                      side: BorderSide(
+                          color: AppColors.error.withValues(alpha: 0.4)),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10)),
                     ),
@@ -5150,7 +5652,8 @@ class _PaymentCard extends StatelessWidget {
                             fontSize: 13, fontWeight: FontWeight.w600)),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.error,
-                      side: BorderSide(color: AppColors.error.withValues(alpha: 0.4)),
+                      side: BorderSide(
+                          color: AppColors.error.withValues(alpha: 0.4)),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10)),
                     ),
@@ -5490,28 +5993,29 @@ class _AdminManageTabState extends State<_AdminManageTab> {
               sliver: SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: Responsive.isDesktop(context)
-                      ? 4
+                      ? 5
                       : Responsive.isTablet(context)
-                          ? (MediaQuery.orientationOf(context) == Orientation.landscape ? 4 : 3)
+                          ? 5
                           : 2,
                   crossAxisSpacing: 14,
                   mainAxisSpacing: 14,
-                  childAspectRatio: 1.1,
+                  childAspectRatio: 1.0,
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
                     final item = items[i];
                     final hasBadge = item.label == 'Payments' && _pending > 0;
                     return GestureDetector(
-                      onTap: () => Navigator.push(ctx,
-                          MaterialPageRoute(builder: (_) => item.page)),
+                      onTap: () => Navigator.push(
+                          ctx, MaterialPageRoute(builder: (_) => item.page)),
                       child: Container(
                         decoration: BoxDecoration(
                           gradient: item.gradient,
                           borderRadius: BorderRadius.circular(20),
                           boxShadow: [
                             BoxShadow(
-                              color: item.gradient.colors.first.withValues(alpha: 0.35),
+                              color: item.gradient.colors.first
+                                  .withValues(alpha: 0.35),
                               blurRadius: 14,
                               offset: const Offset(0, 6),
                             ),
@@ -5534,20 +6038,25 @@ class _AdminManageTabState extends State<_AdminManageTab> {
                               padding: const EdgeInsets.all(16),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   // Icon box
                                   Container(
-                                    width: 42, height: 42,
+                                    width: 42,
+                                    height: 42,
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withValues(alpha: 0.22),
+                                      color:
+                                          Colors.white.withValues(alpha: 0.22),
                                       borderRadius: BorderRadius.circular(12),
                                     ),
-                                    child: Icon(item.icon, color: Colors.white, size: 22),
+                                    child: Icon(item.icon,
+                                        color: Colors.white, size: 22),
                                   ),
                                   // Label + subtitle
                                   Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(item.label,
                                           style: GoogleFonts.poppins(
@@ -5557,18 +6066,24 @@ class _AdminManageTabState extends State<_AdminManageTab> {
                                       if (item.subtitle != null)
                                         Container(
                                           margin: const EdgeInsets.only(top: 3),
-                                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 7, vertical: 2),
                                           decoration: BoxDecoration(
                                             color: hasBadge
-                                                ? const Color(0xFFFF9F43).withValues(alpha: 0.9)
-                                                : Colors.white.withValues(alpha: 0.20),
-                                            borderRadius: BorderRadius.circular(20),
+                                                ? const Color(0xFFFF9F43)
+                                                    .withValues(alpha: 0.9)
+                                                : Colors.white
+                                                    .withValues(alpha: 0.20),
+                                            borderRadius:
+                                                BorderRadius.circular(20),
                                           ),
                                           child: Text(item.subtitle!,
                                               style: GoogleFonts.poppins(
                                                   color: Colors.white,
                                                   fontSize: 10,
-                                                  fontWeight: hasBadge ? FontWeight.w700 : FontWeight.w500)),
+                                                  fontWeight: hasBadge
+                                                      ? FontWeight.w700
+                                                      : FontWeight.w500)),
                                         ),
                                     ],
                                   ),
@@ -5645,7 +6160,8 @@ class _AdminSettingsTab extends StatelessWidget {
                 ),
                 child: Row(children: [
                   Container(
-                    width: 60, height: 60,
+                    width: 60,
+                    height: 60,
                     decoration: BoxDecoration(
                       color: Colors.white.withValues(alpha: 0.25),
                       shape: BoxShape.circle,
@@ -5742,6 +6258,10 @@ class _AdminSettingsTab extends StatelessWidget {
             ]),
             const SizedBox(height: 16),
 
+            // ── Hardware ──────────────────────────────────────────────────
+            const _HardwareSettingsSection(),
+            const SizedBox(height: 16),
+
             // ── App Info ──────────────────────────────────────────────────
             _SettingsSection(title: 'About', children: [
               _SettingsTile(
@@ -5773,21 +6293,19 @@ class _AdminSettingsTab extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: AppColors.error.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                      color: AppColors.error.withValues(alpha: 0.2)),
+                  border:
+                      Border.all(color: AppColors.error.withValues(alpha: 0.2)),
                 ),
-                child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.logout_rounded,
-                          color: AppColors.error, size: 18),
-                      const SizedBox(width: 10),
-                      Text('Logout',
-                          style: GoogleFonts.poppins(
-                              color: AppColors.error,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600)),
-                    ]),
+                child:
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Icon(Icons.logout_rounded, color: AppColors.error, size: 18),
+                  const SizedBox(width: 10),
+                  Text('Logout',
+                      style: GoogleFonts.poppins(
+                          color: AppColors.error,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600)),
+                ]),
               ),
             ),
           ],
@@ -5801,28 +6319,25 @@ class _AdminSettingsTab extends StatelessWidget {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.card,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('Logout',
             style: GoogleFonts.poppins(
                 color: AppColors.textPrimary,
                 fontSize: 16,
                 fontWeight: FontWeight.w600)),
         content: Text('Are you sure you want to logout?',
-            style: GoogleFonts.poppins(
-                color: AppColors.textMedium, fontSize: 13)),
+            style:
+                GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13)),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(context).pop(false),
               child: Text('Cancel',
-                  style:
-                      GoogleFonts.poppins(color: AppColors.textMedium))),
+                  style: GoogleFonts.poppins(color: AppColors.textMedium))),
           TextButton(
               onPressed: () => Navigator.of(context).pop(true),
               child: Text('Logout',
                   style: GoogleFonts.poppins(
-                      color: AppColors.error,
-                      fontWeight: FontWeight.w600))),
+                      color: AppColors.error, fontWeight: FontWeight.w600))),
         ],
       ),
     );
@@ -5896,7 +6411,8 @@ class _SettingsTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
       child: Row(children: [
         Container(
-          width: 34, height: 34,
+          width: 34,
+          height: 34,
           decoration: BoxDecoration(
             color: iconColor.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(9),
@@ -5905,7 +6421,8 @@ class _SettingsTile extends StatelessWidget {
         ),
         const SizedBox(width: 14),
         Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(title,
                 style: GoogleFonts.poppins(
                     color: AppColors.textPrimary,
@@ -6064,7 +6581,8 @@ class _AdminBannersTabState extends State<_AdminBannersTab> {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
             itemCount: banners.length,
             separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (ctx, i) => _BannerCard(banner: banners[i],
+            itemBuilder: (ctx, i) => _BannerCard(
+              banner: banners[i],
               onEdit: () => _showBannerSheet(banners[i]),
               onDelete: () => _deleteBanner(banners[i]),
               onToggle: () => _toggleActive(banners[i]),
@@ -6102,8 +6620,7 @@ class _BannerCard extends StatelessWidget {
         children: [
           // Image preview
           ClipRRect(
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(15)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
             child: banner.imageUrl.isNotEmpty
                 ? CachedNetworkImage(
                     imageUrl: UploadService.fixUrl(banner.imageUrl),
@@ -6319,8 +6836,7 @@ class _BannerFormSheetState extends State<_BannerFormSheet> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(e.toString()),
-            backgroundColor: AppColors.error));
+            content: Text(e.toString()), backgroundColor: AppColors.error));
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -6375,8 +6891,8 @@ class _BannerFormSheetState extends State<_BannerFormSheet> {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: _imageBytes != null
-                    ? Image.memory(_imageBytes!, fit: BoxFit.cover,
-                        width: double.infinity)
+                    ? Image.memory(_imageBytes!,
+                        fit: BoxFit.cover, width: double.infinity)
                     : _existingUrl.isNotEmpty
                         ? CachedNetworkImage(
                             imageUrl: UploadService.fixUrl(_existingUrl),
@@ -6412,8 +6928,8 @@ class _BannerFormSheetState extends State<_BannerFormSheet> {
               controller: _titleCtrl,
               decoration: InputDecoration(
                 labelText: 'Title (optional)',
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
             const SizedBox(height: 12),
@@ -6423,8 +6939,8 @@ class _BannerFormSheetState extends State<_BannerFormSheet> {
               controller: _subtitleCtrl,
               decoration: InputDecoration(
                 labelText: 'Subtitle (optional)',
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
             const SizedBox(height: 12),
@@ -6435,8 +6951,8 @@ class _BannerFormSheetState extends State<_BannerFormSheet> {
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 labelText: 'Display order (0 = first)',
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
             const SizedBox(height: 12),
@@ -6505,10 +7021,16 @@ class _AdminAnnouncementsTabState extends State<_AdminAnnouncementsTab> {
   String? _error;
 
   @override
-  void initState() { super.initState(); _fetch(); }
+  void initState() {
+    super.initState();
+    _fetch();
+  }
 
   Future<void> _fetch() async {
-    setState(() { _isLoading = true; _error = null; });
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
     try {
       final snap = await FirebaseFirestore.instance
           .collection('announcements')
@@ -6519,27 +7041,39 @@ class _AdminAnnouncementsTabState extends State<_AdminAnnouncementsTab> {
           .toList();
       setState(() => _isLoading = false);
     } catch (e) {
-      setState(() { _error = e.toString(); _isLoading = false; });
+      setState(() {
+        _error = e.toString();
+        _isLoading = false;
+      });
     }
   }
 
-  void _snack(String msg, Color c) => ScaffoldMessenger.of(context)
-      .showSnackBar(SnackBar(
+  void _snack(String msg, Color c) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(msg, style: GoogleFonts.poppins(color: Colors.white)),
           backgroundColor: c,
           behavior: SnackBarBehavior.floating));
 
   Future<void> _toggle(AnnouncementModel a) async {
-    try { await _service.toggleActive(a.id, !a.isActive); _fetch(); }
-    catch (e) { _snack(e.toString(), AppColors.error); }
+    try {
+      await _service.toggleActive(a.id, !a.isActive);
+      _fetch();
+    } catch (e) {
+      _snack(e.toString(), AppColors.error);
+    }
   }
 
   Future<void> _delete(AnnouncementModel a) async {
-    final ok = await _showConfirm(
-        context, 'Delete', '"${a.title}" will be removed.');
+    final ok =
+        await _showConfirm(context, 'Delete', '"${a.title}" will be removed.');
     if (!ok) return;
-    try { await _service.delete(a.id); _fetch(); _snack('Deleted', AppColors.success); }
-    catch (e) { _snack(e.toString(), AppColors.error); }
+    try {
+      await _service.delete(a.id);
+      _fetch();
+      _snack('Deleted', AppColors.success);
+    } catch (e) {
+      _snack(e.toString(), AppColors.error);
+    }
   }
 
   @override
@@ -6563,22 +7097,32 @@ class _AdminAnnouncementsTabState extends State<_AdminAnnouncementsTab> {
       floatingActionButton: FloatingActionButton(
         heroTag: 'admin_announce_fab',
         backgroundColor: AppColors.primary,
-        onPressed: () async { await _showAnnouncementSheet(context, null); _fetch(); },
+        onPressed: () async {
+          await _showAnnouncementSheet(context, null);
+          _fetch();
+        },
         child: const Icon(Icons.add_rounded, color: Colors.white),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
+          ? const Center(
+              child: CircularProgressIndicator(color: AppColors.primary))
           : _error != null
-              ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.error_outline_rounded, color: AppColors.error, size: 48),
+              ? Center(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.error_outline_rounded,
+                      color: AppColors.error, size: 48),
                   const SizedBox(height: 12),
-                  Text(_error!, textAlign: TextAlign.center,
-                      style: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 13)),
+                  Text(_error!,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.poppins(
+                          color: AppColors.textMedium, fontSize: 13)),
                   const SizedBox(height: 16),
                   ElevatedButton(onPressed: _fetch, child: const Text('Retry')),
                 ]))
               : _items.isEmpty
-                  ? const _EmptyState(icon: Icons.campaign_outlined, label: 'No announcements yet')
+                  ? const _EmptyState(
+                      icon: Icons.campaign_outlined,
+                      label: 'No announcements yet')
                   : RefreshIndicator(
                       onRefresh: _fetch,
                       color: AppColors.primary,
@@ -6607,8 +7151,10 @@ class _AnnouncementCard extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
   const _AnnouncementCard(
-      {required this.item, required this.onToggle,
-       required this.onEdit, required this.onDelete});
+      {required this.item,
+      required this.onToggle,
+      required this.onEdit,
+      required this.onDelete});
 
   static const _typeIcon = {
     'new_product': Icons.new_releases_rounded,
@@ -6639,7 +7185,8 @@ class _AnnouncementCard extends StatelessWidget {
           ),
         Padding(
           padding: const EdgeInsets.all(14),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               Icon(_typeIcon[item.type] ?? Icons.campaign_rounded,
                   size: 14, color: AppColors.primary),
@@ -6647,8 +7194,10 @@ class _AnnouncementCard extends StatelessWidget {
               Text(
                 item.type.replaceAll('_', ' ').toUpperCase(),
                 style: GoogleFonts.poppins(
-                    color: AppColors.primary, fontSize: 10,
-                    fontWeight: FontWeight.w700, letterSpacing: 0.5),
+                    color: AppColors.primary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5),
               ),
               const Spacer(),
               Transform.scale(
@@ -6663,29 +7212,34 @@ class _AnnouncementCard extends StatelessWidget {
             const SizedBox(height: 4),
             Text(item.title,
                 style: GoogleFonts.poppins(
-                    color: AppColors.textPrimary, fontSize: 14,
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
                     fontWeight: FontWeight.w600),
-                maxLines: 1, overflow: TextOverflow.ellipsis),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
             if (item.body.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(item.body,
                   style: GoogleFonts.poppins(
                       color: AppColors.textMedium, fontSize: 12),
-                  maxLines: 2, overflow: TextOverflow.ellipsis),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis),
             ],
             const SizedBox(height: 10),
             Row(children: [
               _StatusChip(status: item.isActive ? 'active' : 'inactive'),
               const Spacer(),
               IconButton(
-                icon: Icon(Icons.edit_rounded, color: AppColors.primary, size: 18),
+                icon: Icon(Icons.edit_rounded,
+                    color: AppColors.primary, size: 18),
                 onPressed: onEdit,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
               ),
               const SizedBox(width: 12),
               IconButton(
-                icon: Icon(Icons.delete_rounded, color: AppColors.error, size: 18),
+                icon: Icon(Icons.delete_rounded,
+                    color: AppColors.error, size: 18),
                 onPressed: onDelete,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -6749,14 +7303,16 @@ class _AnnouncementFormSheetState extends State<_AnnouncementFormSheet> {
 
   @override
   void dispose() {
-    _titleCtrl.dispose(); _bodyCtrl.dispose();
-    _imageUrlCtrl.dispose(); _productIdCtrl.dispose();
+    _titleCtrl.dispose();
+    _bodyCtrl.dispose();
+    _imageUrlCtrl.dispose();
+    _productIdCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _pickImage() async {
-    final picked = await ImagePicker()
-        .pickImage(source: ImageSource.gallery, imageQuality: 80, maxWidth: 1200);
+    final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery, imageQuality: 80, maxWidth: 1200);
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
     setState(() {
@@ -6768,7 +7324,10 @@ class _AnnouncementFormSheetState extends State<_AnnouncementFormSheet> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    setState(() { _isLoading = true; _formError = null; });
+    setState(() {
+      _isLoading = true;
+      _formError = null;
+    });
     try {
       String imageUrl = _imageUrlCtrl.text.trim();
       if (_imageBytes != null && _imageFileName != null) {
@@ -6879,7 +7438,8 @@ class _AnnouncementFormSheetState extends State<_AnnouncementFormSheet> {
       builder: (_, ctrl) => Container(
         decoration: BoxDecoration(
             color: AppColors.card,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(24))),
         child: Column(children: [
           _SheetHandle(),
           Padding(
@@ -6889,10 +7449,12 @@ class _AnnouncementFormSheetState extends State<_AnnouncementFormSheet> {
               children: [
                 Text(isEdit ? 'Edit Announcement' : 'New Announcement',
                     style: GoogleFonts.poppins(
-                        color: AppColors.textPrimary, fontSize: 18,
+                        color: AppColors.textPrimary,
+                        fontSize: 18,
                         fontWeight: FontWeight.w700)),
                 IconButton(
-                    icon: Icon(Icons.close_rounded, color: AppColors.textMedium),
+                    icon:
+                        Icon(Icons.close_rounded, color: AppColors.textMedium),
                     onPressed: () => Navigator.of(context).pop()),
               ],
             ),
@@ -6904,129 +7466,687 @@ class _AnnouncementFormSheetState extends State<_AnnouncementFormSheet> {
                   20, 8, 20, MediaQuery.of(context).viewInsets.bottom + 24),
               child: Form(
                 key: _formKey,
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  // Type chips
-                  Text('Type', style: GoogleFonts.poppins(
-                      color: AppColors.textMedium, fontSize: 13)),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    children: _types.map((t) {
-                      final sel = _type == t;
-                      return ChoiceChip(
-                        label: Text(_typeLabels[t] ?? t),
-                        selected: sel,
-                        onSelected: (_) => setState(() => _type = t),
-                        selectedColor: AppColors.primary,
-                        labelStyle: GoogleFonts.poppins(
-                            color: sel ? Colors.white : AppColors.textMedium,
-                            fontSize: 12, fontWeight: FontWeight.w500),
-                        backgroundColor: AppColors.surface,
-                        side: BorderSide(
-                            color: sel ? AppColors.primary : AppColors.border),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
-
-                  _Field(
-                      ctrl: _titleCtrl, label: 'Title *',
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? 'Required' : null),
-                  const SizedBox(height: 14),
-                  _Field(ctrl: _bodyCtrl, label: 'Message', maxLines: 3),
-                  const SizedBox(height: 14),
-
-                  // Image
-                  Text('Image', style: GoogleFonts.poppins(
-                      color: AppColors.textMedium, fontSize: 13)),
-                  const SizedBox(height: 6),
-                  if (_imageBytes != null)
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.memory(_imageBytes!,
-                          width: double.infinity, height: 160, fit: BoxFit.cover),
-                    )
-                  else if (previewUrl.isNotEmpty)
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: CachedNetworkImage(
-                        imageUrl: previewUrl,
-                        width: double.infinity, height: 160, fit: BoxFit.cover,
-                        errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Type chips
+                      Text('Type',
+                          style: GoogleFonts.poppins(
+                              color: AppColors.textMedium, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        children: _types.map((t) {
+                          final sel = _type == t;
+                          return ChoiceChip(
+                            label: Text(_typeLabels[t] ?? t),
+                            selected: sel,
+                            onSelected: (_) => setState(() => _type = t),
+                            selectedColor: AppColors.primary,
+                            labelStyle: GoogleFonts.poppins(
+                                color:
+                                    sel ? Colors.white : AppColors.textMedium,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500),
+                            backgroundColor: AppColors.surface,
+                            side: BorderSide(
+                                color:
+                                    sel ? AppColors.primary : AppColors.border),
+                          );
+                        }).toList(),
                       ),
-                    ),
-                  const SizedBox(height: 8),
-                  Row(children: [
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.photo_library_rounded, size: 16),
-                      label: const Text('Gallery'),
-                      style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.primary,
-                          side: BorderSide(color: AppColors.primary)),
-                      onPressed: _pickImage,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _imageUrlCtrl,
-                        onChanged: (_) => setState(() {}),
-                        style: GoogleFonts.poppins(
-                            color: AppColors.textPrimary, fontSize: 13),
-                        decoration: InputDecoration(
-                          labelText: 'or paste URL',
-                          labelStyle: GoogleFonts.poppins(fontSize: 12),
+                      const SizedBox(height: 16),
+
+                      _Field(
+                          ctrl: _titleCtrl,
+                          label: 'Title *',
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? 'Required'
+                              : null),
+                      const SizedBox(height: 14),
+                      _Field(ctrl: _bodyCtrl, label: 'Message', maxLines: 3),
+                      const SizedBox(height: 14),
+
+                      // Image
+                      Text('Image',
+                          style: GoogleFonts.poppins(
+                              color: AppColors.textMedium, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      if (_imageBytes != null)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.memory(_imageBytes!,
+                              width: double.infinity,
+                              height: 160,
+                              fit: BoxFit.cover),
+                        )
+                      else if (previewUrl.isNotEmpty)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: CachedNetworkImage(
+                            imageUrl: previewUrl,
+                            width: double.infinity,
+                            height: 160,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, __, ___) =>
+                                const SizedBox.shrink(),
+                          ),
                         ),
-                      ),
-                    ),
-                  ]),
-                  const SizedBox(height: 14),
-
-                  _Field(ctrl: _productIdCtrl,
-                      label: 'Product ID (optional — adds "View Product" button)'),
-                  const SizedBox(height: 24),
-
-                  // Inline error — always visible even inside a bottom sheet
-                  if (_formError != null) ...[
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: AppColors.error.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.error.withValues(alpha: 0.4)),
-                      ),
-                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Icon(Icons.error_outline_rounded, color: AppColors.error, size: 16),
-                        const SizedBox(width: 8),
+                      const SizedBox(height: 8),
+                      Row(children: [
+                        OutlinedButton.icon(
+                          icon:
+                              const Icon(Icons.photo_library_rounded, size: 16),
+                          label: const Text('Gallery'),
+                          style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.primary,
+                              side: BorderSide(color: AppColors.primary)),
+                          onPressed: _pickImage,
+                        ),
+                        const SizedBox(width: 10),
                         Expanded(
-                          child: Text(_formError!,
-                              style: GoogleFonts.poppins(
-                                  color: AppColors.error, fontSize: 12)),
+                          child: TextFormField(
+                            controller: _imageUrlCtrl,
+                            onChanged: (_) => setState(() {}),
+                            style: GoogleFonts.poppins(
+                                color: AppColors.textPrimary, fontSize: 13),
+                            decoration: InputDecoration(
+                              labelText: 'or paste URL',
+                              labelStyle: GoogleFonts.poppins(fontSize: 12),
+                            ),
+                          ),
                         ),
                       ]),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
+                      const SizedBox(height: 14),
 
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _isLoading ? null : _submit,
-                      child: _isLoading
-                          ? const SizedBox(width: 22, height: 22,
-                              child: CircularProgressIndicator(
-                                  color: Colors.white, strokeWidth: 2))
-                          : Text(isEdit ? 'Update' : 'Publish',
-                              style: GoogleFonts.poppins(
-                                  fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-                ]),
+                      _Field(
+                          ctrl: _productIdCtrl,
+                          label:
+                              'Product ID (optional — adds "View Product" button)'),
+                      const SizedBox(height: 24),
+
+                      // Inline error — always visible even inside a bottom sheet
+                      if (_formError != null) ...[
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.error.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                                color: AppColors.error.withValues(alpha: 0.4)),
+                          ),
+                          child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(Icons.error_outline_rounded,
+                                    color: AppColors.error, size: 16),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(_formError!,
+                                      style: GoogleFonts.poppins(
+                                          color: AppColors.error,
+                                          fontSize: 12)),
+                                ),
+                              ]),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: _isLoading ? null : _submit,
+                          child: _isLoading
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.white, strokeWidth: 2))
+                              : Text(isEdit ? 'Update' : 'Publish',
+                                  style: GoogleFonts.poppins(
+                                      fontWeight: FontWeight.w600)),
+                        ),
+                      ),
+                    ]),
               ),
             ),
           ),
         ]),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hardware Settings Section
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _HardwareSettingsSection extends StatefulWidget {
+  const _HardwareSettingsSection();
+
+  @override
+  State<_HardwareSettingsSection> createState() =>
+      _HardwareSettingsSectionState();
+}
+
+class _HardwareSettingsSectionState extends State<_HardwareSettingsSection> {
+  static const _keyPaperWidth = 'pos_paper_width';
+
+  int _paperWidth = 80;
+  bool _scannerOk = false;
+  String _lastScan = '';
+  final _scanCtrl = TextEditingController();
+  final _scanFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrefs();
+  }
+
+  @override
+  void dispose() {
+    _scanCtrl.dispose();
+    _scanFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _paperWidth = prefs.getInt(_keyPaperWidth) ?? 80;
+    });
+  }
+
+  Future<void> _savePaperWidth(int w) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyPaperWidth, w);
+    setState(() => _paperWidth = w);
+  }
+
+  void _onScanSubmit(String value) {
+    final v = value.trim();
+    if (v.isEmpty) return;
+    setState(() {
+      _scannerOk = true;
+      _lastScan = v;
+    });
+    _scanCtrl.clear();
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _scannerOk = false);
+    });
+  }
+
+  Future<void> _runTestPrint() async {
+    final widthMm = _paperWidth.toDouble();
+    await Printing.layoutPdf(
+      name: 'Test Print',
+      onLayout: (_) async {
+        final doc = pw.Document();
+        doc.addPage(pw.Page(
+          pageFormat: PdfPageFormat(
+            widthMm * PdfPageFormat.mm,
+            double.infinity,
+            marginAll: 4 * PdfPageFormat.mm,
+          ),
+          build: (_) => pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
+            children: [
+              pw.Text('TSfootwear',
+                  style: pw.TextStyle(
+                      fontSize: 16, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 6),
+              pw.Divider(),
+              pw.Text('** TEST PRINT **',
+                  style: pw.TextStyle(
+                      fontSize: 14, fontWeight: pw.FontWeight.bold)),
+              pw.Divider(),
+              pw.Text('Paper width: ${_paperWidth}mm',
+                  style: const pw.TextStyle(fontSize: 10)),
+              pw.Text(
+                  'Printer: ${BtPrinterService.to.connectedDevice.value?.name ?? "USB / Default"}',
+                  style: const pw.TextStyle(fontSize: 10)),
+              pw.SizedBox(height: 8),
+              pw.Text('Printer is working correctly.',
+                  style: const pw.TextStyle(fontSize: 10)),
+            ],
+          ),
+        ));
+        return Uint8List.fromList(await doc.save());
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsSection(title: 'Hardware', children: [
+      _SettingsTile(
+        icon: Icons.qr_code_scanner_rounded,
+        iconColor: const Color(0xFF00B894),
+        title: 'USB Barcode Scanner',
+        subtitle: _scannerOk
+            ? 'Scanned: $_lastScan'
+            : 'Plug in USB scanner — works automatically',
+        trailing: _scannerOk
+            ? const Icon(Icons.check_circle_rounded,
+                color: Color(0xFF00B894), size: 20)
+            : TextButton(
+                onPressed: () => _showScannerTestDialog(context),
+                child: Text('Test',
+                    style: GoogleFonts.poppins(
+                        color: AppColors.primary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+              ),
+      ),
+      _SettingsTile(
+        icon: Icons.receipt_long_rounded,
+        iconColor: AppColors.primary,
+        title: 'Receipt Paper Width',
+        subtitle: 'Affects PDF receipt size',
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          _PaperChip(
+              label: '58mm',
+              selected: _paperWidth == 58,
+              onTap: () => _savePaperWidth(58)),
+          const SizedBox(width: 6),
+          _PaperChip(
+              label: '80mm',
+              selected: _paperWidth == 80,
+              onTap: () => _savePaperWidth(80)),
+        ]),
+      ),
+      _SettingsTile(
+        icon: Icons.print_rounded,
+        iconColor: AppColors.accent,
+        title: 'USB Thermal Printer',
+        subtitle: 'Install driver → appears in print dialog',
+        trailing: TextButton(
+          onPressed: _runTestPrint,
+          child: Text('Test Print',
+              style: GoogleFonts.poppins(
+                  color: AppColors.primary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ),
+      ),
+      Obx(() {
+        final bt = BtPrinterService.to;
+        final connected = bt.isConnected.value;
+        final deviceName = bt.connectedDevice.value?.name ?? '';
+        return _SettingsTile(
+          icon: connected
+              ? Icons.bluetooth_connected_rounded
+              : Icons.bluetooth_rounded,
+          iconColor:
+              connected ? const Color(0xFF00B894) : const Color(0xFF0984E3),
+          title: 'Bluetooth Thermal Printer',
+          subtitle: connected
+              ? 'Connected: $deviceName'
+              : (bt.connectedDevice.value?.name != null
+                  ? 'Last: ${bt.connectedDevice.value!.name}'
+                  : 'Not connected'),
+          trailing: TextButton(
+            onPressed: () => _showBtSetupDialog(context),
+            child: Text(connected ? 'Manage' : 'Connect',
+                style: GoogleFonts.poppins(
+                    color: AppColors.primary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600)),
+          ),
+        );
+      }),
+    ]);
+  }
+
+  void _showScannerTestDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: Text('Test Barcode Scanner',
+            style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00B894).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: const Color(0xFF00B894).withValues(alpha: 0.3)),
+              ),
+              child: Column(children: [
+                const Icon(Icons.qr_code_scanner_rounded,
+                    size: 36, color: Color(0xFF00B894)),
+                const SizedBox(height: 8),
+                Text('Point the scanner at a barcode',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.poppins(
+                        fontSize: 13, color: AppColors.textMedium)),
+              ]),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _scanCtrl,
+              focusNode: _scanFocus,
+              autofocus: true,
+              onSubmitted: (v) {
+                _onScanSubmit(v);
+                Navigator.pop(context);
+              },
+              style: GoogleFonts.poppins(
+                  fontSize: 14, color: AppColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'Scan here...',
+                filled: true,
+                fillColor: AppColors.bg,
+                prefixIcon: const Icon(Icons.qr_code_rounded, size: 18),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('Scanner sends barcode + Enter automatically',
+                style: GoogleFonts.poppins(
+                    fontSize: 11, color: AppColors.textLight)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close',
+                style: GoogleFonts.poppins(color: AppColors.textMedium)),
+          ),
+        ],
+      ),
+    );
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _scanFocus.requestFocus());
+  }
+
+  void _showBtSetupDialog(BuildContext context) {
+    final bt = BtPrinterService.to;
+    // Load devices immediately when dialog opens
+    if (!kIsWeb) bt.loadPairedDevices();
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: Row(children: [
+          Icon(Icons.bluetooth_rounded, color: AppColors.primary, size: 22),
+          const SizedBox(width: 10),
+          Text('Bluetooth Printer',
+              style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                  color: AppColors.textPrimary)),
+        ]),
+        content: SizedBox(
+          width: 360,
+          child: Obx(() {
+            final isConnected = bt.isConnected.value;
+            final isConnecting = bt.isConnecting.value;
+            final isScanning = bt.isScanning.value;
+            final devices = bt.devices;
+            final connected = bt.connectedDevice.value;
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Connection status banner
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isConnected
+                        ? const Color(0xFF00B894).withValues(alpha: 0.1)
+                        : AppColors.bg,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isConnected
+                          ? const Color(0xFF00B894).withValues(alpha: 0.4)
+                          : AppColors.border,
+                    ),
+                  ),
+                  child: Row(children: [
+                    Icon(
+                      isConnected
+                          ? Icons.bluetooth_connected_rounded
+                          : Icons.bluetooth_disabled_rounded,
+                      size: 18,
+                      color: isConnected
+                          ? const Color(0xFF00B894)
+                          : AppColors.textLight,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        isConnected
+                            ? 'Connected: ${connected?.name ?? ''}'
+                            : 'Not connected',
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: isConnected
+                              ? const Color(0xFF00B894)
+                              : AppColors.textMedium,
+                        ),
+                      ),
+                    ),
+                    if (isConnected)
+                      TextButton(
+                        onPressed: isConnecting ? null : () => bt.disconnect(),
+                        child: Text('Disconnect',
+                            style: GoogleFonts.poppins(
+                                fontSize: 11, color: AppColors.secondary)),
+                      ),
+                  ]),
+                ),
+
+                const SizedBox(height: 14),
+
+                // Paired devices header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Paired Devices',
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textMedium)),
+                    TextButton.icon(
+                      onPressed:
+                          isScanning ? null : () => bt.loadPairedDevices(),
+                      icon: isScanning
+                          ? const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.refresh_rounded, size: 14),
+                      label: Text(isScanning ? 'Loading...' : 'Refresh',
+                          style: GoogleFonts.poppins(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                          foregroundColor: AppColors.primary,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4)),
+                    ),
+                  ],
+                ),
+
+                // Device list
+                if (kIsWeb)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      'Bluetooth printing requires the Android app.',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, color: AppColors.textMedium),
+                    ),
+                  )
+                else if (isScanning && devices.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (devices.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      'No paired devices found.\n'
+                      'Pair your printer in Android Settings → Bluetooth first.',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, color: AppColors.textMedium),
+                    ),
+                  )
+                else
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 220),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: devices.length,
+                      itemBuilder: (_, i) {
+                        final d = devices[i];
+                        final isCurrent =
+                            connected?.address == d.address && isConnected;
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 6),
+                          decoration: BoxDecoration(
+                            color: isCurrent
+                                ? const Color(0xFF00B894)
+                                    .withValues(alpha: 0.08)
+                                : AppColors.bg,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: isCurrent
+                                  ? const Color(0xFF00B894)
+                                      .withValues(alpha: 0.4)
+                                  : AppColors.border,
+                            ),
+                          ),
+                          child: ListTile(
+                            dense: true,
+                            leading: Icon(
+                              isCurrent
+                                  ? Icons.bluetooth_connected_rounded
+                                  : Icons.bluetooth_rounded,
+                              color: isCurrent
+                                  ? const Color(0xFF00B894)
+                                  : const Color(0xFF0984E3),
+                              size: 20,
+                            ),
+                            title: Text(d.name,
+                                style: GoogleFonts.poppins(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.textPrimary)),
+                            subtitle: Text(d.address,
+                                style: GoogleFonts.poppins(
+                                    fontSize: 10, color: AppColors.textLight)),
+                            trailing: isCurrent
+                                ? Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00B894)
+                                          .withValues(alpha: 0.15),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text('Connected',
+                                        style: GoogleFonts.poppins(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w600,
+                                            color: const Color(0xFF00B894))),
+                                  )
+                                : isConnecting
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2))
+                                    : ElevatedButton(
+                                        onPressed: () => bt.connect(d),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: AppColors.primary,
+                                          foregroundColor: Colors.white,
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 6),
+                                          minimumSize: Size.zero,
+                                          tapTargetSize:
+                                              MaterialTapTargetSize.shrinkWrap,
+                                          textStyle: GoogleFonts.poppins(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600),
+                                        ),
+                                        child: const Text('Connect'),
+                                      ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            );
+          }),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close',
+                style: GoogleFonts.poppins(color: AppColors.textMedium)),
+          ),
+          if (!kIsWeb)
+            Obx(() => ElevatedButton.icon(
+                  onPressed: BtPrinterService.to.isConnected.value
+                      ? _runTestPrint
+                      : null,
+                  icon: const Icon(Icons.print_rounded, size: 16),
+                  label: Text('Test Print',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13, fontWeight: FontWeight.w600)),
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor:
+                          AppColors.textLight.withValues(alpha: 0.3)),
+                )),
+        ],
+      ),
+    );
+  }
+}
+
+class _PaperChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _PaperChip(
+      {required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : AppColors.bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+              color: selected ? AppColors.primary : AppColors.border),
+        ),
+        child: Text(label,
+            style: GoogleFonts.poppins(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: selected ? Colors.white : AppColors.textMedium)),
       ),
     );
   }

@@ -11,6 +11,24 @@ class AppConstants {
   static const String baseUrl = 'http://168.144.143.60:5001/api';     // DigitalOcean VPS
   // static const String socketUrl = 'http://192.168.0.116:5001';     // local dev (Mac LAN IP)
   static const String socketUrl = 'http://168.144.143.60:5001';       // DigitalOcean VPS
+
+  static const String _vpsHost = 'http://168.144.143.60:5001';
+  static const List<String> _oldHosts = [
+    'http://192.168.0.116:5001',
+    'http://10.0.2.2:5001',
+    'http://localhost:5001',
+  ];
+
+  /// Rewrites any locally-stored image URL to use the current VPS host.
+  static String fixImageUrl(String url) {
+    if (url.isEmpty) return url;
+    for (final old in _oldHosts) {
+      if (url.startsWith(old)) {
+        return url.replaceFirst(old, _vpsHost);
+      }
+    }
+    return url;
+  }
   static const String appName = 'TSfootwear';
   static const String googleMapsApiKey = 'AIzaSyBXmJ-t25_VCKLFZRoXQhRibGiO4mIoRew';
   static const String tokenKey = 'auth_token';

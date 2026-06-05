@@ -1,4 +1,5 @@
 import 'category_model.dart';
+import '../core/constants.dart';
 
 class ProductModel {
   final String id;
@@ -20,6 +21,7 @@ class ProductModel {
   final List<String> colors;
   final int sold;
   final bool isActive;
+  final String barcode;
 
   const ProductModel({
     required this.id,
@@ -41,6 +43,7 @@ class ProductModel {
     this.colors = const [],
     this.sold = 0,
     this.isActive = true,
+    this.barcode = '',
   });
 
   double get discountedPrice {
@@ -52,9 +55,8 @@ class ProductModel {
   bool get isInStock => stock > 0;
 
   String get firstImage {
-    if (thumbnail.isNotEmpty) return thumbnail;
-    if (images.isNotEmpty) return images.first;
-    return '';
+    final raw = thumbnail.isNotEmpty ? thumbnail : (images.isNotEmpty ? images.first : '');
+    return AppConstants.fixImageUrl(raw);
   }
 
   factory ProductModel.fromJson(Map<String, dynamic> json) {
@@ -108,6 +110,7 @@ class ProductModel {
       colors: parseStringList(json['colors']),
       sold: parseInt(json['sold']),
       isActive: json['isActive'] ?? true,
+      barcode: json['barcode'] ?? '',
     );
   }
 
@@ -131,6 +134,7 @@ class ProductModel {
         'colors': colors,
         'sold': sold,
         'isActive': isActive,
+        'barcode': barcode,
       };
 
   ProductModel copyWith({
@@ -153,6 +157,7 @@ class ProductModel {
     List<String>? colors,
     int? sold,
     bool? isActive,
+    String? barcode,
   }) {
     return ProductModel(
       id: id ?? this.id,
@@ -174,6 +179,7 @@ class ProductModel {
       colors: colors ?? this.colors,
       sold: sold ?? this.sold,
       isActive: isActive ?? this.isActive,
+      barcode: barcode ?? this.barcode,
     );
   }
 }

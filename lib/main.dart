@@ -5,6 +5,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:get/get.dart';
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'firebase_options.dart';
 import 'core/theme.dart';
@@ -21,6 +22,9 @@ import 'controllers/announcement_controller.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_in_app_messaging/firebase_in_app_messaging.dart';
 import 'services/notification_service.dart';
+import 'services/bt_printer_service.dart';
+import 'services/offline_service.dart';
+import 'services/barcode_server_service.dart';
 
 // Repository implementations
 import 'package:three_seasons_project/features/auth/data/repositories/auth_repository.dart';
@@ -53,6 +57,12 @@ void main() async {
   await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(true);
 
   if (!kIsWeb) {
+    // Enable Firestore offline persistence so reads/writes survive no-network
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true,
+      cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+    );
+
     // Background message handler — mobile only.
     // On web, push is handled by firebase-messaging-sw.js (service worker).
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
@@ -108,6 +118,9 @@ class ThreeSeasonsApp extends StatelessWidget {
           Get.put(ChatController(), permanent: true);
           Get.put(NotificationController(), permanent: true);
           Get.put(AnnouncementController(), permanent: true);
+          Get.put(BtPrinterService(), permanent: true);
+          Get.put(OfflineService(), permanent: true);
+          Get.put(BarcodeScannerService(), permanent: true);
         }),
       ),
     );
