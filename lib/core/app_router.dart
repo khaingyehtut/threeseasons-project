@@ -118,6 +118,13 @@ class AppRouter {
         ),
       ),
       GoRoute(
+        path: '/admin/products',
+        builder: (_, __) => _Deferred(
+          load: admin_dash.loadLibrary,
+          create: () => admin_dash.AdminProductsPage(),
+        ),
+      ),
+      GoRoute(
         path: '/product/:id',
         builder: (_, state) => _Deferred(
           load: product_detail.loadLibrary,

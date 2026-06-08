@@ -1,12 +1,13 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
 import 'package:get/get.dart';
+
+import '../features/pos/data/repositories/pos_repository.dart';
 import '../models/pos_sale_model.dart';
 import '../models/product_model.dart';
-import '../services/offline_service.dart';
 
 class PosController extends GetxController {
-  final _db = FirebaseFirestore.instance;
+  final _repo = PosRepository.to;
 
   final cartItems = <PosCartItem>[].obs;
   final paymentMethod = 'cash'.obs;
@@ -15,12 +16,28 @@ class PosController extends GetxController {
   final orderDiscountType = 'amount'.obs; // 'amount' | 'percent'
   final isProcessing = false.obs;
   final heldOrders = <PosSaleModel>[].obs;
-  // Local stock reservations for sales made while offline (productId → qty)
-  final reservedStock = <String, int>{}.obs;
   final lastSale = Rxn<PosSaleModel>();
   final salesHistory = <PosSaleModel>[].obs;
   final isLoadingHistory = false.obs;
   final lastError = Rxn<String>();
+
+  // Local stock reservations for sales made while offline (productId → qty)
+  final reservedStock = <String, int>{}.obs;
+
+  StreamSubscription<void>? _syncSub;
+
+  @override
+  void onInit() {
+    super.onInit();
+    // Refresh sales history whenever the offline queue finishes syncing
+    _syncSub = _repo.onSyncComplete.stream.listen((_) => fetchSalesHistory());
+  }
+
+  @override
+  void onClose() {
+    _syncSub?.cancel();
+    super.onClose();
+  }
 
   // ── Computed ───────────────────────────────────────────────────────────────
 
@@ -36,15 +53,17 @@ class PosController extends GetxController {
   double get total => (subtotal - discountValue).clamp(0, double.infinity);
 
   double get change =>
-      paymentMethod.value == 'cash' ? (cashGiven.value - total).clamp(0, double.infinity) : 0;
+      paymentMethod.value == 'cash'
+          ? (cashGiven.value - total).clamp(0, double.infinity)
+          : 0;
 
   bool get canCharge =>
       total > 0 &&
-      (paymentMethod.value == 'card' || cashGiven.value >= total);
+      (paymentMethod.value != 'cash' || cashGiven.value >= total);
 
   int get cartCount => cartItems.fold(0, (acc, i) => acc + i.qty);
 
-  // ── Cart Operations ───────────────────────────────────────────────────────
+  // ── Cart ───────────────────────────────────────────────────────────────────
 
   void addToCart(ProductModel product, {String? size, String? color}) {
     final idx = cartItems.indexWhere(
@@ -77,7 +96,7 @@ class PosController extends GetxController {
     paymentMethod.value = 'cash';
   }
 
-  // ── Hold / Resume ─────────────────────────────────────────────────────────
+  // ── Hold / Resume ──────────────────────────────────────────────────────────
 
   void holdOrder(String cashierName) {
     if (cartItems.isEmpty) return;
@@ -126,23 +145,21 @@ class PosController extends GetxController {
     return held.id;
   }
 
-  // ── Process Payment ───────────────────────────────────────────────────────
+  // ── Payment ────────────────────────────────────────────────────────────────
 
-  Future<PosSaleModel?> processPayment(String cashierName) async {
+  Future<PosSaleModel?> processPayment(
+    String cashierName, {
+    String staffName = '',
+  }) async {
     if (!canCharge || cartItems.isEmpty) return null;
     isProcessing.value = true;
 
-    // Snapshot items before clearing the cart
     final snapshot = cartItems.toList();
-
-    // Reserve stock locally so product panel shows correct qty immediately
-    for (final item in snapshot) {
-      reservedStock[item.product.id] =
-          (reservedStock[item.product.id] ?? 0) + item.qty;
-    }
+    _reserveStock(snapshot);
 
     try {
       final saleId = 'POS-${DateTime.now().millisecondsSinceEpoch}';
+      final costTotal = _calcTotalCost(snapshot);
       final sale = PosSaleModel(
         id: saleId,
         items: _cartToItems(),
@@ -154,39 +171,17 @@ class PosController extends GetxController {
         change: paymentMethod.value == 'cash' ? change : 0,
         cashierName: cashierName,
         createdAt: DateTime.now(),
+        totalCost: costTotal,
+        totalProfit: costTotal > 0 ? total - costTotal : 0,
+        staffName: staffName,
       );
 
-      final isOnline = !kIsWeb &&
-              Get.isRegistered<OfflineService>()
-          ? OfflineService.to.isOnline.value
-          : true;
-
-      if (isOnline) {
-        // ── Online: write directly to Firestore ──────────────────────────
-        final batch = _db.batch();
-        batch.set(_db.collection('pos_sales').doc(saleId), sale.toJson());
-        for (final item in snapshot) {
-          batch.update(_db.collection('products').doc(item.product.id), {
-            'stock': FieldValue.increment(-item.qty),
-            'sold': FieldValue.increment(item.qty),
-          });
-        }
-        await batch.commit();
-        // Release reservations — Firestore stream will reflect real stock
-        _releaseReserved(snapshot);
-      } else {
-        // ── Offline: save to queue, keep reservations until synced ───────
-        final ops = snapshot
-            .map((i) => {'productId': i.product.id, 'qty': i.qty})
-            .toList();
-        await OfflineService.to.enqueue(saleJson: sale.toJson(), stockOps: ops);
-      }
-
+      await _repo.saveSale(sale: sale, cartItems: snapshot);
+      _releaseReserved(snapshot);
       lastSale.value = sale;
       clearCart();
       return sale;
     } catch (e) {
-      // Revert reservations so stock display is correct
       _releaseReserved(snapshot);
       lastError.value = 'Payment failed: $e';
       return null;
@@ -195,61 +190,18 @@ class PosController extends GetxController {
     }
   }
 
-  void _releaseReserved(List<PosCartItem> items) {
-    for (final item in items) {
-      final curr = reservedStock[item.product.id] ?? 0;
-      final next = curr - item.qty;
-      if (next <= 0) {
-        reservedStock.remove(item.product.id);
-      } else {
-        reservedStock[item.product.id] = next;
-      }
-    }
-  }
+  // ── Refund ─────────────────────────────────────────────────────────────────
 
-  // ── Refund ────────────────────────────────────────────────────────────────
-
-  /// Refunds selected items from a completed sale.
-  /// [refundItems] maps productId -> qty to refund.
   Future<String?> processRefund(
-      PosSaleModel sale, List<Map<String, dynamic>> refundItems) async {
+    PosSaleModel sale,
+    List<Map<String, dynamic>> refundItems,
+  ) async {
     isProcessing.value = true;
     try {
-      final refundTotal = refundItems.fold<double>(
-          0, (acc, i) => acc + ((i['lineTotal'] as num?)?.toDouble() ?? 0));
-
-      final refundId = 'REF-${DateTime.now().millisecondsSinceEpoch}';
-      final batch = _db.batch();
-
-      batch.set(_db.collection('pos_sales').doc(refundId), {
-        'id': refundId,
-        'originalSaleId': sale.id,
-        'type': 'refund',
-        'items': refundItems,
-        'total': refundTotal,
-        'cashierName': sale.cashierName,
-        'createdAt': DateTime.now().toIso8601String(),
-      });
-
-      // Mark original sale as refunded
-      batch.update(_db.collection('pos_sales').doc(sale.id), {
-        'refundId': refundId,
-        'status': 'refunded',
-      });
-
-      // Restore stock
-      for (final item in refundItems) {
-        final pid = item['productId'] as String?;
-        final qty = (item['qty'] as num?)?.toInt() ?? 0;
-        if (pid != null && pid.isNotEmpty && qty > 0) {
-          batch.update(_db.collection('products').doc(pid), {
-            'stock': FieldValue.increment(qty),
-            'sold': FieldValue.increment(-qty),
-          });
-        }
-      }
-
-      await batch.commit();
+      final refundId = await _repo.saveRefund(
+        originalSale: sale,
+        refundItems: refundItems,
+      );
       await fetchSalesHistory();
       return refundId;
     } catch (e) {
@@ -260,26 +212,39 @@ class PosController extends GetxController {
     }
   }
 
-  // ── Sales History ─────────────────────────────────────────────────────────
+  // ── Sales History ──────────────────────────────────────────────────────────
 
   Future<void> fetchSalesHistory() async {
     isLoadingHistory.value = true;
     try {
-      final snap = await _db
-          .collection('pos_sales')
-          .orderBy('createdAt', descending: true)
-          .limit(50)
-          .get();
-      salesHistory.value = snap.docs
-          .map((d) => PosSaleModel.fromJson({...d.data(), 'id': d.id}))
-          .toList();
+      salesHistory.value = await _repo.getSalesHistory();
     } catch (_) {
     } finally {
       isLoadingHistory.value = false;
     }
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  void _reserveStock(List<PosCartItem> items) {
+    for (final item in items) {
+      if (item.product.id.startsWith('CUSTOM-')) continue;
+      reservedStock[item.product.id] =
+          (reservedStock[item.product.id] ?? 0) + item.qty;
+    }
+  }
+
+  void _releaseReserved(List<PosCartItem> items) {
+    for (final item in items) {
+      if (item.product.id.startsWith('CUSTOM-')) continue;
+      final next = (reservedStock[item.product.id] ?? 0) - item.qty;
+      if (next <= 0) {
+        reservedStock.remove(item.product.id);
+      } else {
+        reservedStock[item.product.id] = next;
+      }
+    }
+  }
 
   List<Map<String, dynamic>> _cartToItems() => cartItems
       .map((i) => {
@@ -291,6 +256,16 @@ class PosController extends GetxController {
             'size': i.size ?? '',
             'color': i.color ?? '',
             'lineTotal': i.lineTotal,
+            if (i.product.originalPrice != null)
+              'originalPrice': i.product.originalPrice,
+            if (i.product.originalPrice != null)
+              'itemProfit':
+                  (i.product.discountedPrice - i.product.originalPrice!) * i.qty,
           })
       .toList();
+
+  double _calcTotalCost(List<PosCartItem> items) => items.fold(0.0, (acc, i) {
+        final op = i.product.originalPrice;
+        return acc + (op != null ? op * i.qty : 0.0);
+      });
 }

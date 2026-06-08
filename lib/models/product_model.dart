@@ -22,6 +22,7 @@ class ProductModel {
   final int sold;
   final bool isActive;
   final String barcode;
+  final double? originalPrice; // cost / purchase price (optional)
 
   const ProductModel({
     required this.id,
@@ -44,6 +45,7 @@ class ProductModel {
     this.sold = 0,
     this.isActive = true,
     this.barcode = '',
+    this.originalPrice,
   });
 
   double get discountedPrice {
@@ -53,6 +55,13 @@ class ProductModel {
 
   bool get hasDiscount => discount > 0;
   bool get isInStock => stock > 0;
+  bool get hasCostPrice => originalPrice != null && originalPrice! > 0;
+  double? get profitPerUnit =>
+      hasCostPrice ? (discountedPrice - originalPrice!) : null;
+  double? get profitMarginPercent =>
+      (hasCostPrice && discountedPrice > 0)
+          ? ((discountedPrice - originalPrice!) / discountedPrice * 100)
+          : null;
 
   String get firstImage {
     final raw = thumbnail.isNotEmpty ? thumbnail : (images.isNotEmpty ? images.first : '');
@@ -111,6 +120,9 @@ class ProductModel {
       sold: parseInt(json['sold']),
       isActive: json['isActive'] ?? true,
       barcode: json['barcode'] ?? '',
+      originalPrice: json['originalPrice'] != null
+          ? parseDouble(json['originalPrice'])
+          : null,
     );
   }
 
@@ -135,6 +147,7 @@ class ProductModel {
         'sold': sold,
         'isActive': isActive,
         'barcode': barcode,
+        if (originalPrice != null) 'originalPrice': originalPrice,
       };
 
   ProductModel copyWith({
@@ -158,6 +171,7 @@ class ProductModel {
     int? sold,
     bool? isActive,
     String? barcode,
+    double? originalPrice,
   }) {
     return ProductModel(
       id: id ?? this.id,
@@ -180,6 +194,7 @@ class ProductModel {
       sold: sold ?? this.sold,
       isActive: isActive ?? this.isActive,
       barcode: barcode ?? this.barcode,
+      originalPrice: originalPrice ?? this.originalPrice,
     );
   }
 }

@@ -517,7 +517,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 14),
             SizedBox(
-              height: 265,
+              height: Responsive.cardExtent(context),
               child: pp.isLoading.value && pp.featuredProducts.isEmpty
                   ? _buildFeaturedShimmer()
                   : pp.featuredProducts.isEmpty
@@ -532,7 +532,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             return Padding(
                               padding: const EdgeInsets.only(right: 14),
                               child: SizedBox(
-                                width: 160,
+                                width: Responsive.isTabletLandscape(context) ? 140 : 160,
                                 child: ProductCard(
                                   product: product,
                                   isInCart: cart.isInCart(product.id),
@@ -599,13 +599,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return Obx(() {
       final pp = Get.find<ProductController>();
       final cart = Get.find<CartController>();
-      final isLandscape =
-          MediaQuery.orientationOf(context) == Orientation.landscape;
-      final cols = Responsive.isDesktop(context)
-          ? 4
-          : Responsive.isTablet(context)
-              ? (isLandscape ? 4 : 3)
-              : 2;
+      final cols = Responsive.gridColumns(context);
 
       if (pp.isLoading.value && pp.products.isEmpty) {
         return SliverPadding(
@@ -620,7 +614,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               crossAxisCount: cols,
               crossAxisSpacing: 14,
               mainAxisSpacing: 14,
-              mainAxisExtent: 265,
+              mainAxisExtent: Responsive.cardExtent(context),
             ),
           ),
         );
@@ -1505,7 +1499,9 @@ class _AllCategoriesSheet extends StatelessWidget {
       initialChildSize: 0.75,
       maxChildSize: 0.95,
       minChildSize: 0.4,
-      builder: (_, ctrl) => Container(
+      builder: (_, ctrl) => Responsive.constrainSheet(
+        context,
+        Container(
         decoration: BoxDecoration(
           color: AppColors.card,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
@@ -1553,8 +1549,14 @@ class _AllCategoriesSheet extends StatelessWidget {
               child: GridView.builder(
                 controller: ctrl,
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: Responsive.isDesktop(context)
+                      ? 6
+                      : Responsive.isTabletLandscape(context)
+                          ? 5
+                          : Responsive.isTablet(context)
+                              ? 4
+                              : 3,
                   crossAxisSpacing: 12,
                   mainAxisSpacing: 12,
                   childAspectRatio: 0.85,
@@ -1584,6 +1586,7 @@ class _AllCategoriesSheet extends StatelessWidget {
               ),
             ),
           ],
+        ),
         ),
       ),
     );

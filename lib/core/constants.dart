@@ -1,8 +1,12 @@
-/// Formats a price: shows decimals only when non-zero (e.g. 10000.00 → "10000", 10000.50 → "10000.5")
+/// Formats a price: strips trailing .0 (e.g. 10000.0 → "Ks 10000", 10000.5 → "Ks 10000.5")
 String fmtPrice(double? v) {
   final val = v ?? 0.0;
   return 'Ks ${val % 1 == 0 ? val.toStringAsFixed(0) : val.toStringAsFixed(2).replaceAll(RegExp(r'0+$'), '')}';
 }
+
+/// Converts a double to string without trailing .0 (e.g. 1000.0 → "1000", 1000.5 → "1000.5")
+String numStr(double v) =>
+    v % 1 == 0 ? v.toStringAsFixed(0) : v.toString();
 
 class AppConstants {
   // static const String baseUrl = 'http://10.0.2.2:5001/api';        // Android emulator

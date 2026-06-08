@@ -1,15 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/pos_sale_model.dart';
 
-import 'bt_printer_stub.dart'
-    if (dart.library.io) 'bt_printer_native.dart';
+import 'bt_printer_stub.dart' if (dart.library.io) 'bt_printer_native.dart';
 
-class BtPrinterService extends GetxController {
+class BtPrinterService extends GetxController with WidgetsBindingObserver {
   static BtPrinterService get to => Get.find();
 
   final devices = <BtDevice>[].obs;
@@ -20,11 +22,59 @@ class BtPrinterService extends GetxController {
 
   static const _keyAddress = 'pos_bt_address';
   static const _keyName = 'pos_bt_name';
+  static const _pingInterval = Duration(seconds: 15);
+
+  Timer? _pingTimer;
+  bool _autoReconnecting = false;
 
   @override
   void onInit() {
     super.onInit();
+    WidgetsBinding.instance.addObserver(this);
     _restoreLastDevice();
+    _startPing();
+  }
+
+  @override
+  void onClose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _pingTimer?.cancel();
+    super.onClose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _autoReconnect();
+    }
+  }
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(_pingInterval, (_) async {
+      if (kIsWeb || isConnecting.value || _autoReconnecting) return;
+      if (connectedDevice.value == null) return;
+      final still = await BtNative.isConnected;
+      if (!still && isConnected.value) {
+        isConnected.value = false;
+        _autoReconnect();
+      }
+    });
+  }
+
+  Future<void> _autoReconnect() async {
+    if (kIsWeb || _autoReconnecting || isConnecting.value) return;
+    final device = connectedDevice.value;
+    if (device == null) return;
+    _autoReconnecting = true;
+    try {
+      await BtNative.connect(device);
+      isConnected.value = await BtNative.isConnected;
+    } catch (_) {
+      isConnected.value = false;
+    } finally {
+      _autoReconnecting = false;
+    }
   }
 
   Future<void> _restoreLastDevice() async {
@@ -35,7 +85,6 @@ class BtPrinterService extends GetxController {
     if (addr.isNotEmpty) {
       final device = BtDevice(name: name, address: addr);
       connectedDevice.value = device;
-      // Reconnect automatically so isConnected reflects reality
       try {
         await BtNative.connect(device);
         isConnected.value = await BtNative.isConnected;
@@ -94,9 +143,16 @@ class BtPrinterService extends GetxController {
       final raw = e.toString();
       // Extract a readable message from PlatformException
       final msg = raw.contains('connect_error')
-          ? raw.split('connect_error')[1].replaceAll(RegExp(r'[()"\[\]]'), '').trim()
+          ? raw
+              .split('connect_error')[1]
+              .replaceAll(RegExp(r'[()"\[\]]'), '')
+              .trim()
           : raw;
-      _showError('Connection failed', msg.isNotEmpty ? msg : 'Could not connect. Make sure the printer is on and paired.');
+      _showError(
+          'Connection failed',
+          msg.isNotEmpty
+              ? msg
+              : 'Could not connect. Make sure the printer is on and paired.');
     } finally {
       isConnecting.value = false;
     }
@@ -148,12 +204,15 @@ class BtPrinterService extends GetxController {
       final charsPerLine = paperWidth == 58 ? 32 : 48;
       final prefs = await SharedPreferences.getInstance();
       final settings = ReceiptSettings(
-        storeName:    prefs.getString(ReceiptSettings.kStoreName)    ?? 'TSfootwear',
-        storeAddress: prefs.getString(ReceiptSettings.kStoreAddress) ?? '54 St, 115D Corner',
-        footer:       prefs.getString(ReceiptSettings.kFooter)       ?? 'Thank you!',
-        showId:       prefs.getBool(ReceiptSettings.kShowId)         ?? true,
-        showCashier:  prefs.getBool(ReceiptSettings.kShowCashier)    ?? true,
-        showDate:     prefs.getBool(ReceiptSettings.kShowDate)       ?? true,
+        storeName:
+            prefs.getString(ReceiptSettings.kStoreName) ?? 'သုံးရာသီဖိနပ်ဆိုင်',
+        storeAddress: prefs.getString(ReceiptSettings.kStoreAddress) ??
+            '54 လမ်း, 115D လမ်းထောင့်',
+        footer: prefs.getString(ReceiptSettings.kFooter) ??
+            '🙏အားပေးမှုကိုကျေးဇူးတင်ပါတယ်🙏',
+        showId: prefs.getBool(ReceiptSettings.kShowId) ?? true,
+        showCashier: prefs.getBool(ReceiptSettings.kShowCashier) ?? true,
+        showDate: prefs.getBool(ReceiptSettings.kShowDate) ?? true,
       );
       await BtNative.printReceipt(sale, charsPerLine, settings);
       return true;
@@ -161,7 +220,6 @@ class BtPrinterService extends GetxController {
       return false;
     }
   }
-
 }
 
 /// Platform-neutral Bluetooth device record

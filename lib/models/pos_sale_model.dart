@@ -9,20 +9,20 @@ class ReceiptSettings {
   final bool showDate;
 
   const ReceiptSettings({
-    this.storeName = 'TSfootwear',
-    this.storeAddress = '54 St, 115D Corner',
-    this.footer = 'Thank you!',
+    this.storeName = 'သုံးရာသီဖိနပ်ဆိုင်',
+    this.storeAddress = '54 လမ်း, 115D လမ်းထောင့်',
+    this.footer = '🙏အားပေးမှုကိုကျေးဇူးတင်ပါတယ်🙏',
     this.showId = true,
     this.showCashier = true,
     this.showDate = true,
   });
 
-  static const kStoreName    = 'receipt_store_name';
+  static const kStoreName = 'receipt_store_name';
   static const kStoreAddress = 'receipt_store_address';
-  static const kFooter       = 'receipt_footer';
-  static const kShowId       = 'receipt_show_id';
-  static const kShowCashier  = 'receipt_show_cashier';
-  static const kShowDate     = 'receipt_show_date';
+  static const kFooter = 'receipt_footer';
+  static const kShowId = 'receipt_show_id';
+  static const kShowCashier = 'receipt_show_cashier';
+  static const kShowDate = 'receipt_show_date';
 }
 
 class PosCartItem {
@@ -50,6 +50,10 @@ class PosSaleModel {
   final String status; // 'completed' | 'refunded'
   final String type; // 'sale' | 'refund'
   final String originalSaleId; // set on refund records
+  final double totalCost; // sum of originalPrice * qty for items that have cost
+  final double
+      totalProfit; // total - totalCost (only meaningful when totalCost > 0)
+  final String staffName; // optional: who actually sold (separate from cashier)
 
   PosSaleModel({
     required this.id,
@@ -65,7 +69,14 @@ class PosSaleModel {
     this.status = 'completed',
     this.type = 'sale',
     this.originalSaleId = '',
+    this.totalCost = 0.0,
+    this.totalProfit = 0.0,
+    this.staffName = '',
   });
+
+  bool get hasProfitData => totalCost > 0;
+  double get profitMarginPercent =>
+      (hasProfitData && total > 0) ? (totalProfit / total * 100) : 0;
 
   bool get isRefundRecord => type == 'refund';
   bool get isRefunded => status == 'refunded';
@@ -84,6 +95,9 @@ class PosSaleModel {
         'status': status,
         'type': type,
         'originalSaleId': originalSaleId,
+        'totalCost': totalCost,
+        'totalProfit': totalProfit,
+        'staffName': staffName,
       };
 
   factory PosSaleModel.fromJson(Map<String, dynamic> json) {
@@ -114,6 +128,9 @@ class PosSaleModel {
       status: json['status'] ?? 'completed',
       type: json['type'] ?? 'sale',
       originalSaleId: json['originalSaleId'] ?? '',
+      totalCost: (json['totalCost'] as num?)?.toDouble() ?? 0,
+      totalProfit: (json['totalProfit'] as num?)?.toDouble() ?? 0,
+      staffName: json['staffName'] ?? '',
     );
   }
 }

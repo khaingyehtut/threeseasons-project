@@ -16,6 +16,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../controllers/auth_controller.dart';
@@ -27,7 +28,7 @@ import '../../models/product_model.dart';
 import '../../models/category_model.dart';
 import '../../services/barcode_server_service.dart';
 import '../../services/bt_printer_service.dart';
-import '../../services/offline_service.dart';
+import '../../features/pos/data/repositories/pos_repository.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POS Screen
@@ -69,10 +70,10 @@ class _PosScreenState extends State<PosScreen>
         if (!kIsWeb)
           Obx(() {
             final svc =
-                Get.isRegistered<OfflineService>() ? OfflineService.to : null;
+                Get.isRegistered<PosRepository>() ? PosRepository.to : null;
             if (svc == null) return const SizedBox.shrink();
-            final offline = !svc.isOnline.value;
-            final pending = svc.pendingCount.value;
+            final offline = !svc.isOnlinObs.value;
+            final pending = svc.pendingCountObs.value;
             final syncing = svc.isSyncing.value;
             if (!offline && pending == 0) return const SizedBox.shrink();
             final bgColor =
@@ -106,8 +107,8 @@ class _PosScreenState extends State<PosScreen>
                 ),
                 if (!offline && pending > 0 && !syncing)
                   GestureDetector(
-                    onTap: () => OfflineService.to.syncNow(),
-                    child: Text('Sync now',
+                    onTap: () => PosRepository.to.syncPending(),
+                    child: Text('ယခု ထပ်တူပြုရန်',
                         style: GoogleFonts.poppins(
                             fontSize: 11,
                             color: Colors.white,
@@ -171,16 +172,19 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
   Widget build(BuildContext context) {
     super.build(context);
     final w = MediaQuery.of(context).size.width;
-    if (w >= 800) {
+    if (w >= 700) {
+      // Landscape / tablet: side-by-side layout.
+      // Cart width scales with screen: 30% clamped between 300–440 px.
+      final cartW = (w * 0.30).clamp(300.0, 440.0);
       return Row(
         children: [
-          Expanded(flex: 6, child: _ProductPanel(pos: widget.pos)),
+          Expanded(child: _ProductPanel(pos: widget.pos)),
           Container(width: 1, color: AppColors.border),
-          SizedBox(width: 340, child: _CartPanel(pos: widget.pos)),
+          SizedBox(width: cartW, child: _CartPanel(pos: widget.pos)),
         ],
       );
     }
-    // Mobile: product panel + floating cart FAB
+    // Mobile / portrait: product panel + floating cart FAB
     return Stack(
       children: [
         _ProductPanel(pos: widget.pos),
@@ -204,6 +208,9 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
   }
 
   void _showMobileCart(BuildContext context, PosController pos) {
+    final h = MediaQuery.of(context).size.height;
+    final isLandscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -212,7 +219,8 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.85,
+        // In landscape the screen is short — use 95% height so cart is usable.
+        height: h * (isLandscape ? 0.95 : 0.85),
         child: _CartPanel(pos: pos),
       ),
     );
@@ -233,9 +241,8 @@ class _ProductPanel extends StatefulWidget {
 
 class _ProductPanelState extends State<_ProductPanel> {
   final _searchCtrl = TextEditingController();
-  final _scanFocus = FocusNode();
   final _searchFocus = FocusNode();
-  final _beep  = AudioPlayer();
+  final _beep = AudioPlayer();
   final _error = AudioPlayer();
   String _query = '';
   String _categoryId = '';
@@ -245,27 +252,48 @@ class _ProductPanelState extends State<_ProductPanel> {
   Timer? _debounce;
   StreamSubscription? _productSub;
 
+  // USB / BT HID barcode scanner: accumulate keystrokes globally so the
+  // on-screen keyboard never pops up during a scan.
+  String _hwBuffer = '';
+  int _hwLastKeyMs = 0;
+  static const _kScanGapMs = 80; // scanners fire chars < 80 ms apart
+  ModalRoute<dynamic>? _route;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _route = ModalRoute.of(context);
+  }
+
   @override
   void initState() {
     super.initState();
     _loadCategories();
     _subscribeProducts();
-    // Rebuild when offline stock reservations change
     ever(widget.pos.reservedStock, (_) {
       if (mounted) setState(() {});
     });
-    // Receive barcodes from companion app over WiFi
+    // WiFi barcode scanner (companion app)
     if (!kIsWeb && Get.isRegistered<BarcodeScannerService>()) {
       BarcodeScannerService.to.onBarcodeReceived = (barcode) {
         if (mounted) _onBarcodeSubmit(barcode);
       };
     }
+    // USB / BT HID scanner — intercept hardware keys globally, no TextField focus
+    HardwareKeyboard.instance.addHandler(_handleHardwareKey);
+    // Pre-load sounds so first play is instant (no asset-load latency)
+    _beep
+      ..setReleaseMode(ReleaseMode.stop)
+      ..setSourceAsset('sounds/beeb.mp3');
+    _error
+      ..setReleaseMode(ReleaseMode.stop)
+      ..setSourceAsset('sounds/error.mp3');
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
     _searchCtrl.dispose();
-    _scanFocus.dispose();
     _searchFocus.dispose();
     _debounce?.cancel();
     _productSub?.cancel();
@@ -275,6 +303,37 @@ class _ProductPanelState extends State<_ProductPanel> {
     _beep.dispose();
     _error.dispose();
     super.dispose();
+  }
+
+  bool _handleHardwareKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    // Don't intercept keys when another screen (e.g. product form) is on top
+    if (_route?.isCurrent != true) return false;
+    // User is typing in the search bar — let keystrokes through normally
+    if (_searchFocus.hasFocus) return false;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // Gap too long → human key press, not scanner; reset buffer
+    if (_hwBuffer.isNotEmpty && now - _hwLastKeyMs > _kScanGapMs) {
+      _hwBuffer = '';
+    }
+    _hwLastKeyMs = now;
+
+    // Enter → barcode complete, submit it
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      final code = _hwBuffer.trim();
+      _hwBuffer = '';
+      if (code.isNotEmpty && mounted) _onBarcodeSubmit(code);
+      return true; // consume so Enter doesn't focus anything
+    }
+
+    final char = event.character;
+    if (char != null && char.isNotEmpty) {
+      _hwBuffer += char;
+      return true;
+    }
+    return false;
   }
 
   Future<void> _loadCategories() async {
@@ -353,16 +412,15 @@ class _ProductPanelState extends State<_ProductPanel> {
     // Step 2: after short delay — match, add or error
     Future.delayed(const Duration(milliseconds: 400), () {
       if (!mounted) return;
-      final exact = _products
-          .where((p) => p.barcode.trim() == trimmed)
-          .toList();
+      final exact =
+          _products.where((p) => p.barcode.trim() == trimmed).toList();
       if (exact.isNotEmpty) {
         // Match — add to cart + beep + clear bar
         _addProductToCart(exact.first);
         _searchCtrl.clear();
       } else {
         // No match — error sound, keep barcode in bar
-        _error.play(AssetSource('sounds/error.mp3'));
+        _error.seek(Duration.zero).then((_) => _error.resume());
       }
     });
   }
@@ -376,7 +434,27 @@ class _ProductPanelState extends State<_ProductPanel> {
 
   void _addProductToCart(ProductModel product) {
     widget.pos.addToCart(product);
-    _beep.play(AssetSource('sounds/beeb.mp3'));
+    _beep.seek(Duration.zero).then((_) => _beep.resume());
+  }
+
+  Future<void> _showCustomItemDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _CustomItemDialog(
+        onAdd: (name, price, qty) {
+          final customProduct = ProductModel(
+            id: 'CUSTOM-${DateTime.now().millisecondsSinceEpoch}',
+            name: name,
+            price: price,
+            stock: 9999,
+          );
+          for (var i = 0; i < qty; i++) {
+            widget.pos.addToCart(customProduct);
+          }
+          _beep.seek(Duration.zero).then((_) => _beep.resume());
+        },
+      ),
+    );
   }
 
   @override
@@ -392,22 +470,21 @@ class _ProductPanelState extends State<_ProductPanel> {
               Expanded(
                 child: TextField(
                   controller: _searchCtrl,
-                  focusNode: _scanFocus,
-                  onSubmitted: _onBarcodeSubmit,
+                  focusNode: _searchFocus,
                   onChanged: _onSearchChanged,
                   style: GoogleFonts.poppins(
                       fontSize: 14, color: AppColors.textPrimary),
                   decoration: InputDecoration(
-                    hintText: 'Scan barcode or search product...',
-                    prefixIcon:
-                        const Icon(Icons.qr_code_scanner_rounded, size: 20),
+                    hintText:
+                        'ကုန်ပစ္စည်း ရှာမည်... (ဘားကုဒ် အလိုအလျောက် ထည့်သည်)',
+                    prefixIcon: const Icon(Icons.search_rounded, size: 20),
                     suffixIcon: _query.isNotEmpty
                         ? IconButton(
                             icon: const Icon(Icons.close, size: 18),
                             onPressed: () {
                               _searchCtrl.clear();
                               setState(() => _query = '');
-                              _scanFocus.requestFocus();
+                              _searchFocus.unfocus();
                             },
                           )
                         : null,
@@ -423,6 +500,12 @@ class _ProductPanelState extends State<_ProductPanel> {
                 ),
               ),
               const SizedBox(width: 8),
+              IconButton(
+                onPressed: _showCustomItemDialog,
+                icon: const Icon(Icons.add_box_rounded),
+                tooltip: 'Custom ကုန်ပစ္စည်း',
+                color: AppColors.primary,
+              ),
               IconButton(
                 onPressed: _subscribeProducts,
                 icon: const Icon(Icons.refresh_rounded),
@@ -442,7 +525,7 @@ class _ProductPanelState extends State<_ProductPanel> {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               children: [
                 _CatChip(
-                  label: 'All',
+                  label: 'အားလုံး',
                   selected: _categoryId.isEmpty,
                   onTap: () => setState(() => _categoryId = ''),
                 ),
@@ -467,7 +550,7 @@ class _ProductPanelState extends State<_ProductPanel> {
                           Icon(Icons.search_off_rounded,
                               size: 48, color: AppColors.textLight),
                           const SizedBox(height: 8),
-                          Text('No products found',
+                          Text('ကုန်ပစ္စည်း မတွေ့ပါ',
                               style: GoogleFonts.poppins(
                                   color: AppColors.textMedium)),
                         ],
@@ -490,6 +573,126 @@ class _ProductPanelState extends State<_ProductPanel> {
                     ),
         ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom Item Dialog
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _CustomItemDialog extends StatefulWidget {
+  final void Function(String name, double price, int qty) onAdd;
+  const _CustomItemDialog({required this.onAdd});
+
+  @override
+  State<_CustomItemDialog> createState() => _CustomItemDialogState();
+}
+
+class _CustomItemDialogState extends State<_CustomItemDialog> {
+  final _nameCtrl = TextEditingController();
+  final _priceCtrl = TextEditingController();
+  final _qtyCtrl = TextEditingController(text: '1');
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _priceCtrl.dispose();
+    _qtyCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _nameCtrl.text.trim();
+    final price = double.tryParse(_priceCtrl.text.trim()) ?? 0;
+    final qty = int.tryParse(_qtyCtrl.text.trim()) ?? 1;
+    if (name.isEmpty || price <= 0) return;
+    widget.onAdd(name, price, qty.clamp(1, 999));
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.card,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text('Custom ကုန်ပစ္စည်း ထည့်မည်',
+          style: GoogleFonts.poppins(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        _dialogField(
+          ctrl: _nameCtrl,
+          hint: 'ကုန်ပစ္စည်းအမည်',
+          icon: Icons.label_outline_rounded,
+          inputType: TextInputType.text,
+          onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+        ),
+        const SizedBox(height: 12),
+        _dialogField(
+          ctrl: _priceCtrl,
+          hint: 'ဈေးနှုန်း (Ks)',
+          icon: Icons.attach_money_rounded,
+          // text type so any keyboard layout can enter numbers
+          inputType: TextInputType.text,
+          onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+        ),
+        const SizedBox(height: 12),
+        _dialogField(
+          ctrl: _qtyCtrl,
+          hint: 'အရေအတွက်',
+          icon: Icons.production_quantity_limits_rounded,
+          inputType: TextInputType.number,
+          onSubmitted: (_) => _submit(),
+        ),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text('ပယ်ဖျက်မည်',
+              style: GoogleFonts.poppins(color: AppColors.textMedium)),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            foregroundColor: Colors.white,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          onPressed: _submit,
+          child: Text('ထည့်မည်', style: GoogleFonts.poppins(fontSize: 13)),
+        ),
+      ],
+    );
+  }
+
+  Widget _dialogField({
+    required TextEditingController ctrl,
+    required String hint,
+    required IconData icon,
+    required TextInputType inputType,
+    ValueChanged<String>? onSubmitted,
+  }) {
+    return TextField(
+      controller: ctrl,
+      keyboardType: inputType,
+      onSubmitted: onSubmitted,
+      style: GoogleFonts.poppins(fontSize: 13, color: AppColors.textPrimary),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle:
+            GoogleFonts.poppins(fontSize: 13, color: AppColors.textMedium),
+        prefixIcon: Icon(icon, size: 18, color: AppColors.textMedium),
+        filled: true,
+        fillColor: AppColors.bg,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide.none,
+        ),
+      ),
     );
   }
 }
@@ -658,8 +861,37 @@ class _CartPanelState extends State<_CartPanel> {
   final _cashCtrl = TextEditingController();
   final _discountCtrl = TextEditingController();
   bool _showNumpad = false;
+  String? _selectedStaff;
+  List<String> _staffList = [];
 
   PosController get pos => widget.pos;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStaff();
+  }
+
+  Future<void> _loadStaff() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('pos_staff')
+          .orderBy('name')
+          .get();
+      if (mounted) {
+        final names = snap.docs
+            .map((d) => (d.data()['name'] as String? ?? '').trim())
+            .where((n) => n.isNotEmpty)
+            .toList();
+        setState(() {
+          _staffList = names;
+          if (_selectedStaff == null && names.isNotEmpty) {
+            _selectedStaff = names.first;
+          }
+        });
+      }
+    } catch (_) {}
+  }
 
   @override
   void dispose() {
@@ -680,11 +912,11 @@ class _CartPanelState extends State<_CartPanel> {
           Icon(Icons.shopping_cart_outlined,
               size: 52, color: AppColors.textLight),
           const SizedBox(height: 10),
-          Text('Cart is empty',
+          Text('ဈေးတောင်း ထဲ မရှိသေးပါ',
               style: GoogleFonts.poppins(
                   color: AppColors.textMedium, fontSize: 14)),
           const SizedBox(height: 4),
-          Text('Scan or tap a product to add',
+          Text('ကုန်ပစ္စည်း ထည့်ရန် စကင်မည် သို့မဟုတ် နှိပ်ပါ',
               style: GoogleFonts.poppins(
                   color: AppColors.textLight, fontSize: 12)),
         ]),
@@ -704,29 +936,96 @@ class _CartPanelState extends State<_CartPanel> {
   // ── Helper: payment area (replaces cart list) ─────────────────────────────
 
   Widget _buildPaymentArea() {
-    final isCash = pos.paymentMethod.value == 'cash';
+    final method = pos.paymentMethod.value;
+    final isCash = method == 'cash';
     return Column(
       children: [
-        // Payment method toggle
+        // Payment method toggle — 1 × 4 row
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
           child: Row(children: [
             _PaymentBtn(
-              label: 'Cash',
+              label: 'ငွေသား',
               icon: Icons.payments_rounded,
-              selected: isCash,
+              selected: method == 'cash',
+              color: const Color(0xFF2D8CFF),
               onTap: () => pos.paymentMethod.value = 'cash',
             ),
             const SizedBox(width: 8),
             _PaymentBtn(
-              label: 'Card',
+              label: 'KPay',
+              icon: Icons.account_balance_wallet_rounded,
+              assetImage: 'assets/icons/kpay.png',
+              selected: method == 'kpay',
+              color: const Color(0xFF00A0DC),
+              onTap: () => pos.paymentMethod.value = 'kpay',
+            ),
+            const SizedBox(width: 8),
+            _PaymentBtn(
+              label: 'WavePay',
+              icon: Icons.waves_rounded,
+              assetImage: 'assets/icons/wavepay.png',
+              selected: method == 'wavepay',
+              color: const Color(0xFF7B2FF7),
+              onTap: () => pos.paymentMethod.value = 'wavepay',
+            ),
+            const SizedBox(width: 8),
+            _PaymentBtn(
+              label: 'ကတ်',
               icon: Icons.credit_card_rounded,
-              selected: !isCash,
+              selected: method == 'card',
+              color: const Color(0xFF43A047),
               onTap: () => pos.paymentMethod.value = 'card',
             ),
           ]),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
+
+        // ── Staff selector (optional) ──────────────────────────────────────
+        if (_staffList.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: AppColors.bg,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Row(children: [
+                Icon(Icons.person_rounded, size: 18, color: AppColors.textMedium),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButton<String>(
+                    value: _selectedStaff,
+                    isExpanded: true,
+                    underline: const SizedBox.shrink(),
+                    dropdownColor: AppColors.card,
+                    style: GoogleFonts.poppins(
+                        fontSize: 13, color: AppColors.textPrimary),
+                    hint: Text('ရောင်းချသူ ရွေးချယ်ရန်',
+                        style: GoogleFonts.poppins(
+                            fontSize: 12, color: AppColors.textMedium)),
+                    items: [
+                      DropdownMenuItem<String>(
+                        value: null,
+                        child: Text('မရွေးချယ်ရသေးပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 12, color: AppColors.textMedium)),
+                      ),
+                      ..._staffList.map((name) => DropdownMenuItem<String>(
+                            value: name,
+                            child: Text(name,
+                                style: GoogleFonts.poppins(fontSize: 13)),
+                          )),
+                    ],
+                    onChanged: (v) => setState(() => _selectedStaff = v),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        const SizedBox(height: 8),
 
         // Cash numpad (fills remaining space)
         if (isCash)
@@ -744,7 +1043,7 @@ class _CartPanelState extends State<_CartPanel> {
             ),
           ),
 
-        // Card view
+        // Digital payment view (KPay / WavePay / Card)
         if (!isCash)
           Expanded(
             child: Center(
@@ -752,14 +1051,20 @@ class _CartPanelState extends State<_CartPanel> {
                 Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.08),
+                    color: _methodColor(method).withValues(alpha: 0.10),
                     shape: BoxShape.circle,
                   ),
-                  child: Icon(Icons.credit_card_rounded,
-                      size: 48, color: AppColors.primary),
+                  child: method == 'kpay' || method == 'wavepay'
+                      ? Image.asset(
+                          'assets/icons/$method.png',
+                          width: 48,
+                          height: 48,
+                        )
+                      : Icon(_methodIcon(method),
+                          size: 48, color: _methodColor(method)),
                 ),
                 const SizedBox(height: 16),
-                Text('Card Payment',
+                Text(_methodLabel(method),
                     style: GoogleFonts.poppins(
                         fontSize: 16,
                         fontWeight: FontWeight.w700,
@@ -769,9 +1074,9 @@ class _CartPanelState extends State<_CartPanel> {
                     style: GoogleFonts.poppins(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
-                        color: AppColors.primary)),
+                        color: _methodColor(method))),
                 const SizedBox(height: 8),
-                Text('Press CHARGE to confirm',
+                Text('ကောက်ခံရန် CHARGE နှိပ်ပါ',
                     style: GoogleFonts.poppins(
                         fontSize: 12, color: AppColors.textMedium)),
               ]),
@@ -892,7 +1197,7 @@ class _CartPanelState extends State<_CartPanel> {
                     if (!_showNumpad) ...[
                       _TotalRow('Subtotal', fmtPrice(pos.subtotal)),
                       Row(children: [
-                        Text('Discount',
+                        Text('လျှော့ဈေး',
                             style: GoogleFonts.poppins(
                                 fontSize: 13, color: AppColors.textMedium)),
                         const Spacer(),
@@ -923,7 +1228,7 @@ class _CartPanelState extends State<_CartPanel> {
                     ],
                     // TOTAL row (always shown)
                     Row(children: [
-                      Text('TOTAL',
+                      Text('စုစုပေါင်း',
                           style: GoogleFonts.poppins(
                               fontSize: 16,
                               fontWeight: FontWeight.w800,
@@ -947,7 +1252,7 @@ class _CartPanelState extends State<_CartPanel> {
                               pos.holdOrder(_cashierName);
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
-                                  content: Text('Order held',
+                                  content: Text('မှာယူမှု ခေတ္တဆိုင်းထားပြီ',
                                       style: GoogleFonts.poppins()),
                                   backgroundColor: AppColors.textMedium,
                                   behavior: SnackBarBehavior.floating,
@@ -956,7 +1261,7 @@ class _CartPanelState extends State<_CartPanel> {
                               );
                             },
                             icon: const Icon(Icons.pause_rounded, size: 16),
-                            label: Text('Hold',
+                            label: Text('ဆိုင်းထားရန်',
                                 style: GoogleFonts.poppins(fontSize: 13)),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: AppColors.textMedium,
@@ -971,7 +1276,7 @@ class _CartPanelState extends State<_CartPanel> {
                           child: ElevatedButton.icon(
                             onPressed: () => setState(() => _showNumpad = true),
                             icon: const Icon(Icons.payment_rounded, size: 18),
-                            label: Text('PAY',
+                            label: Text('ငွေပေးချေ',
                                 style: GoogleFonts.poppins(
                                     fontSize: 15, fontWeight: FontWeight.w700)),
                             style: ElevatedButton.styleFrom(
@@ -992,7 +1297,7 @@ class _CartPanelState extends State<_CartPanel> {
                             onPressed: () =>
                                 setState(() => _showNumpad = false),
                             icon: const Icon(Icons.close_rounded, size: 16),
-                            label: Text('Cancel',
+                            label: Text('မလုပ်တော့',
                                 style: GoogleFonts.poppins(fontSize: 13)),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: AppColors.textMedium,
@@ -1012,7 +1317,7 @@ class _CartPanelState extends State<_CartPanel> {
                                       : null,
                                   icon: const Icon(Icons.check_circle_rounded,
                                       size: 18),
-                                  label: Text('CHARGE',
+                                  label: Text('ကောက်ခံ',
                                       style: GoogleFonts.poppins(
                                           fontSize: 14,
                                           fontWeight: FontWeight.w700)),
@@ -1038,12 +1343,20 @@ class _CartPanelState extends State<_CartPanel> {
   }
 
   Future<void> _processPayment(BuildContext context) async {
-    final sale = await pos.processPayment(_cashierName);
+    final sale = await pos.processPayment(_cashierName,
+        staffName: _selectedStaff ?? '');
     if (sale == null) return;
     // Cart is now cleared — hide payment view so the (empty) cart shows
     _cashCtrl.clear();
     _discountCtrl.clear();
-    if (mounted) setState(() => _showNumpad = false);
+    if (mounted) {
+      setState(() {
+        _showNumpad = false;
+        _selectedStaff = null;
+      });
+    }
+    // Refresh history so Sales History tab (today totals) updates immediately
+    pos.fetchSalesHistory();
     if (context.mounted) {
       showDialog(
         context: context,
@@ -1057,15 +1370,15 @@ class _CartPanelState extends State<_CartPanel> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.card,
-        title: Text('Clear Cart',
+        title: Text('ဈေးတောင်း ရှင်းရန်',
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        content: Text('Remove all items from cart?',
+        content: Text('ဈေးတောင်းမှ ပစ္စည်းအားလုံး ဖယ်ရှားမလား?',
             style: GoogleFonts.poppins(color: AppColors.textMedium)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel',
+            child: Text('မလုပ်တော့',
                 style: GoogleFonts.poppins(color: AppColors.textMedium)),
           ),
           ElevatedButton(
@@ -1078,8 +1391,8 @@ class _CartPanelState extends State<_CartPanel> {
             },
             style:
                 ElevatedButton.styleFrom(backgroundColor: AppColors.secondary),
-            child:
-                Text('Clear', style: GoogleFonts.poppins(color: Colors.white)),
+            child: Text('ရှင်းရန်',
+                style: GoogleFonts.poppins(color: Colors.white)),
           ),
         ],
       ),
@@ -1098,7 +1411,7 @@ class _CartPanelState extends State<_CartPanel> {
       builder: (_) => StatefulBuilder(
         builder: (ctx, setS) => AlertDialog(
           backgroundColor: AppColors.card,
-          title: Text('Order Discount',
+          title: Text('မှာယူမှု လျှော့ဈေး',
               style: GoogleFonts.poppins(
                   fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
           content: Column(
@@ -1107,12 +1420,12 @@ class _CartPanelState extends State<_CartPanel> {
               Row(
                 children: [
                   _DiscTypeBtn(
-                      label: 'Amount (Ks)',
+                      label: 'ပမာဏ (ကျပ်)',
                       selected: type == 'amount',
                       onTap: () => setS(() => type = 'amount')),
                   const SizedBox(width: 8),
                   _DiscTypeBtn(
-                      label: 'Percent (%)',
+                      label: 'ရာခိုင်နှုန်း (%)',
                       selected: type == 'percent',
                       onTap: () => setS(() => type = 'percent')),
                 ],
@@ -1140,7 +1453,7 @@ class _CartPanelState extends State<_CartPanel> {
                 pos.orderDiscount.value = 0;
                 Navigator.pop(ctx);
               },
-              child: Text('Remove',
+              child: Text('ဖယ်ရှားရန်',
                   style: GoogleFonts.poppins(color: AppColors.secondary)),
             ),
             ElevatedButton(
@@ -1151,7 +1464,7 @@ class _CartPanelState extends State<_CartPanel> {
               },
               style:
                   ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
-              child: Text('Apply',
+              child: Text('သုံးရန်',
                   style: GoogleFonts.poppins(color: Colors.white)),
             ),
           ],
@@ -1170,7 +1483,8 @@ class _CartPanelState extends State<_CartPanel> {
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text('Held Orders (${pos.heldOrders.length})',
+                child: Text(
+                    'ခေတ္တဆိုင်းထားသော မှာယူမှုများ (${pos.heldOrders.length})',
                     style: GoogleFonts.poppins(
                         fontWeight: FontWeight.w700,
                         fontSize: 16,
@@ -1202,14 +1516,14 @@ class _CartPanelState extends State<_CartPanel> {
                           Navigator.pop(context);
                           final id = pos.resumeHeldOrder(i);
                           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                            content: Text('Resumed: $id',
+                            content: Text('ပြန်လည် ဆောင်ရွက်သည်: $id',
                                 style: GoogleFonts.poppins()),
                             backgroundColor: AppColors.primary,
                             behavior: SnackBarBehavior.floating,
                             duration: const Duration(seconds: 3),
                           ));
                         },
-                        child: Text('Resume',
+                        child: Text('ဆက်ရန်',
                             style:
                                 GoogleFonts.poppins(color: AppColors.primary)),
                       ),
@@ -1220,6 +1534,45 @@ class _CartPanelState extends State<_CartPanel> {
             ],
           )),
     );
+  }
+
+  Color _methodColor(String method) {
+    switch (method) {
+      case 'kpay':
+        return const Color(0xFF00A0DC);
+      case 'wavepay':
+        return const Color(0xFF7B2FF7);
+      case 'card':
+        return const Color(0xFF43A047);
+      default:
+        return AppColors.primary;
+    }
+  }
+
+  IconData _methodIcon(String method) {
+    switch (method) {
+      case 'kpay':
+        return Icons.account_balance_wallet_rounded;
+      case 'wavepay':
+        return Icons.waves_rounded;
+      case 'card':
+        return Icons.credit_card_rounded;
+      default:
+        return Icons.payments_rounded;
+    }
+  }
+
+  String _methodLabel(String method) {
+    switch (method) {
+      case 'kpay':
+        return 'KBZ Pay (KPay) ဖြင့် ငွေပေးချေမှု';
+      case 'wavepay':
+        return 'WavePay ဖြင့် ငွေပေးချေမှု';
+      case 'card':
+        return 'ကတ်ဖြင့် ငွေပေးချေမှု';
+      default:
+        return 'ငွေပေးချေမှု';
+    }
   }
 }
 
@@ -1388,10 +1741,12 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
     if (!mounted) return;
     setState(() {
       _settings = ReceiptSettings(
-        storeName: prefs.getString(ReceiptSettings.kStoreName) ?? 'TSfootwear',
+        storeName:
+            prefs.getString(ReceiptSettings.kStoreName) ?? 'သုံးရာသီဖိနပ်ဆိုင်',
         storeAddress: prefs.getString(ReceiptSettings.kStoreAddress) ??
-            '54 St, 115D Corner',
-        footer: prefs.getString(ReceiptSettings.kFooter) ?? 'Thank you!',
+            '54 လမ်း, 115D လမ်းထောင့်',
+        footer: prefs.getString(ReceiptSettings.kFooter) ??
+            'အားပေးမှုကိုကျေးဇူးတင်ပါတယ်',
         showId: prefs.getBool(ReceiptSettings.kShowId) ?? true,
         showCashier: prefs.getBool(ReceiptSettings.kShowCashier) ?? true,
         showDate: prefs.getBool(ReceiptSettings.kShowDate) ?? true,
@@ -1422,7 +1777,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
                   const Icon(Icons.check_circle_rounded,
                       color: Colors.white, size: 24),
                   const SizedBox(width: 10),
-                  Text('Payment Successful',
+                  Text('ငွေပေးချေမှု အောင်မြင်ပြီ',
                       style: GoogleFonts.poppins(
                           color: Colors.white,
                           fontSize: 16,
@@ -1455,7 +1810,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
                         child: OutlinedButton.icon(
                           onPressed: () => Navigator.pop(context),
                           icon: const Icon(Icons.close, size: 16),
-                          label: Text('Close',
+                          label: Text('ပိတ်ရန်',
                               style: GoogleFonts.poppins(fontSize: 13)),
                           style: OutlinedButton.styleFrom(
                               foregroundColor: AppColors.textMedium,
@@ -1475,7 +1830,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
                                       strokeWidth: 2, color: Colors.white))
                               : const Icon(Icons.photo_camera_rounded,
                                   size: 16),
-                          label: Text('Print Photo',
+                          label: Text('ဓာတ်ပုံ ပရင့်ထုတ်ရန်',
                               style: GoogleFonts.poppins(
                                   fontSize: 13, fontWeight: FontWeight.w600)),
                           style: ElevatedButton.styleFrom(
@@ -1491,7 +1846,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
                     child: OutlinedButton.icon(
                       onPressed: _printing ? null : () => _printText(context),
                       icon: const Icon(Icons.text_fields_rounded, size: 16),
-                      label: Text('Print Text (English only)',
+                      label: Text('စာသား ပရင့်ထုတ်ရန် (အင်္ဂလိပ်သာ)',
                           style: GoogleFonts.poppins(fontSize: 12)),
                       style: OutlinedButton.styleFrom(
                           foregroundColor: AppColors.textMedium,
@@ -1512,7 +1867,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
     final messenger = ScaffoldMessenger.of(context);
     if (kIsWeb || !bt.isConnected.value) {
       messenger.showSnackBar(SnackBar(
-        content: Text('Connect a Bluetooth printer first',
+        content: Text('အရင်ဆုံး ဘလူးတုသ် ပရင်တာ ချိတ်ပါ',
             style: GoogleFonts.poppins()),
         backgroundColor: AppColors.secondary,
         behavior: SnackBarBehavior.floating,
@@ -1537,7 +1892,8 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
       await bt.printImage(bytes);
     } catch (e) {
       messenger.showSnackBar(SnackBar(
-        content: Text('Print failed: $e', style: GoogleFonts.poppins()),
+        content:
+            Text('ပရင့်ထုတ်မှု မအောင်မြင်ပါ: $e', style: GoogleFonts.poppins()),
         backgroundColor: AppColors.secondary,
         behavior: SnackBarBehavior.floating,
       ));
@@ -1638,12 +1994,12 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
             }),
             pw.Divider(),
             if (sale.discount > 0)
-              _pdfRow('Discount', '-${fmtPrice(sale.discount)}'),
+              _pdfRow('လျှော့ဈေး', '-${fmtPrice(sale.discount)}'),
             pw.SizedBox(height: 4),
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Text('TOTAL',
+                pw.Text('စုစုပေါင်း',
                     style: pw.TextStyle(
                         fontSize: 13, fontWeight: pw.FontWeight.bold)),
                 pw.Text(fmtPrice(sale.total),
@@ -1653,15 +2009,22 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
             ),
             pw.SizedBox(height: 4),
             if (sale.paymentMethod == 'cash') ...[
-              _pdfRow('Cash', fmtPrice(sale.cashGiven)),
-              _pdfRow('Change', fmtPrice(sale.change)),
+              _pdfRow('ငွေသား', fmtPrice(sale.cashGiven)),
+              _pdfRow('ငွေအမ်း', fmtPrice(sale.change)),
             ] else
-              _pdfRow('Payment', 'Card'),
+              _pdfRow(
+                  'ငွေပေးချေမှု',
+                  sale.paymentMethod == 'kpay'
+                      ? 'KPay'
+                      : sale.paymentMethod == 'wavepay'
+                          ? 'WavePay'
+                          : 'ကတ်'),
             pw.Divider(),
             pw.Center(
               child: pw.Text('Thank you! / Kyay Zu Tin Bar Tae',
                   style: const pw.TextStyle(fontSize: 9)),
             ),
+            pw.SizedBox(height: 40),
           ],
         ),
       ),
@@ -1712,13 +2075,15 @@ class _ReceiptBody extends StatelessWidget {
           ),
         ),
         const _ReceiptDash(),
-        if (settings.showId) _ReceiptRow('Receipt', sale.id, small: true),
+        if (settings.showId) _ReceiptRow('ဘောင်ချာ', sale.id, small: true),
         if (settings.showDate)
           _ReceiptRow(
               'Date', DateFormat('dd/MM/yyyy HH:mm').format(sale.createdAt),
               small: true),
         if (settings.showCashier)
           _ReceiptRow('Cashier', sale.cashierName, small: true),
+        if (settings.showCashier && sale.staffName.isNotEmpty)
+          _ReceiptRow('Staff', sale.staffName, small: true),
         const _ReceiptDash(),
         // Items
         ...sale.items.map((item) {
@@ -1760,7 +2125,7 @@ class _ReceiptBody extends StatelessWidget {
         }),
         const _ReceiptDash(),
         if (sale.discount > 0)
-          _ReceiptRow('Discount', '-${fmtPrice(sale.discount)}'),
+          _ReceiptRow('လျှော့ဈေး', '-${fmtPrice(sale.discount)}'),
         const SizedBox(height: 4),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1782,7 +2147,13 @@ class _ReceiptBody extends StatelessWidget {
           _ReceiptRow('ပေးငွေ', fmtPrice(sale.cashGiven)),
           _ReceiptRow('ပြန်အမ်းငွေ', fmtPrice(sale.change)),
         ] else
-          _ReceiptRow('ငွေပေးချေမှု', 'Card'),
+          _ReceiptRow(
+              'ငွေပေးချေမှု',
+              sale.paymentMethod == 'kpay'
+                  ? 'KPay'
+                  : sale.paymentMethod == 'wavepay'
+                      ? 'WavePay'
+                      : 'ကတ်'),
         const _ReceiptDash(),
         if (settings.footer.isNotEmpty)
           Center(
@@ -1801,12 +2172,15 @@ class _ReceiptDash extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Text(
-          '- ' * 22,
-          style: TextStyle(
-              fontSize: 11,
-              color: AppColors.textMedium,
-              letterSpacing: 0),
+        child: SizedBox(
+          width: double.infinity,
+          child: Text(
+            '-' * 200,
+            softWrap: false,
+            overflow: TextOverflow.clip,
+            style: TextStyle(
+                fontSize: 11, color: AppColors.textMedium, letterSpacing: 0),
+          ),
         ),
       );
 }
@@ -1871,40 +2245,53 @@ class _PaymentBtn extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool selected;
+  final Color color;
   final VoidCallback onTap;
+  final String? assetImage;
   const _PaymentBtn(
       {required this.label,
       required this.icon,
       required this.selected,
-      required this.onTap});
+      required this.color,
+      required this.onTap,
+      this.assetImage});
 
   @override
   Widget build(BuildContext context) {
+    final Widget logoWidget = assetImage != null
+        ? Image.asset(assetImage!, width: 28, height: 28)
+        : Icon(icon,
+            size: 26, color: selected ? Colors.white : AppColors.textMedium);
+
     return Expanded(
       child: GestureDetector(
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 10),
+          padding: EdgeInsets.symmetric(vertical: selected ? 6 : 10),
           decoration: BoxDecoration(
-            color: selected ? AppColors.primary : AppColors.bg,
+            color: selected ? color : AppColors.bg,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: selected ? AppColors.primary : AppColors.border,
+              color: selected ? color : AppColors.border,
             ),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon,
-                  size: 16,
-                  color: selected ? Colors.white : AppColors.textMedium),
-              const SizedBox(width: 6),
-              Text(label,
+              logoWidget,
+              if (selected) ...[
+                const SizedBox(height: 3),
+                Text(
+                  label,
                   style: GoogleFonts.poppins(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? Colors.white : AppColors.textMedium)),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ],
           ),
         ),
@@ -1963,10 +2350,81 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab> {
   final _searchCtrl = TextEditingController();
   String _query = '';
 
+  // ── Chart state ───────────────────────────────────────────────────────────
+  Map<DateTime, double> _chartData = {};
+  bool _chartLoading = false;
+  late DateTime _chartFrom;
+  late DateTime _chartTo;
+
+  @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    _chartTo = DateTime(now.year, now.month, now.day);
+    _chartFrom = _chartTo.subtract(const Duration(days: 6));
+    _fetchChart();
+  }
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _fetchChart() async {
+    setState(() => _chartLoading = true);
+    try {
+      final snap =
+          await FirebaseFirestore.instance.collection('pos_sales').get();
+      final Map<DateTime, double> map = {};
+      final days = _chartTo.difference(_chartFrom).inDays;
+      for (int i = 0; i <= days; i++) {
+        map[_chartFrom.add(Duration(days: i))] = 0;
+      }
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        final isRefund = (d['type'] as String? ?? 'sale') == 'refund';
+        final raw = d['createdAt'];
+        DateTime? dt;
+        if (raw is String) dt = DateTime.tryParse(raw);
+        if (dt == null) continue;
+        final day = DateTime(dt.year, dt.month, dt.day);
+        if (map.containsKey(day)) {
+          final amount = (d['total'] as num?)?.toDouble() ?? 0;
+          map[day] = (map[day] ?? 0) + (isRefund ? -amount : amount);
+        }
+      }
+      if (mounted)
+        setState(() {
+          _chartData = map;
+          _chartLoading = false;
+        });
+    } catch (_) {
+      if (mounted) setState(() => _chartLoading = false);
+    }
+  }
+
+  Future<void> _pickChartRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDateRange: DateTimeRange(start: _chartFrom, end: _chartTo),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.light(primary: AppColors.primary),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _chartFrom =
+            DateTime(picked.start.year, picked.start.month, picked.start.day);
+        _chartTo = DateTime(picked.end.year, picked.end.month, picked.end.day);
+      });
+      _fetchChart();
+    }
   }
 
   List<PosSaleModel> _filtered(List<PosSaleModel> all) {
@@ -1985,211 +2443,645 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab> {
     }).toList();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          color: AppColors.card,
-          child: TextField(
-            controller: _searchCtrl,
-            onChanged: (v) => setState(() => _query = v),
-            style:
-                GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
-            decoration: InputDecoration(
-              hintText: 'Search by ID, cashier, product...',
-              prefixIcon: const Icon(Icons.search_rounded, size: 20),
-              suffixIcon: _query.isNotEmpty
-                  ? IconButton(
-                      icon: const Icon(Icons.close, size: 18),
-                      onPressed: () {
-                        _searchCtrl.clear();
-                        setState(() => _query = '');
-                      },
-                    )
-                  : null,
-              filled: true,
-              fillColor: AppColors.bg,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
-              ),
+  String _fmtK(double v) {
+    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
+    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
+    return v.toStringAsFixed(0);
+  }
+
+  Widget _buildChartPanel() {
+    final sortedDays = _chartData.keys.toList()..sort();
+    final maxVal = _chartData.values.fold(0.0, max);
+    final yMax = maxVal <= 0 ? 1000.0 : maxVal * 1.25;
+    final total = _chartData.values.fold<double>(0, (a, b) => a + b);
+    final activeDays = _chartData.values.where((v) => v > 0).length;
+
+    // ── Today's payment breakdown ──────────────────────────────────────────
+    final now = DateTime.now();
+    final todaySales = widget.pos.salesHistory.where((s) {
+      final d = s.createdAt;
+      return d.year == now.year &&
+          d.month == now.month &&
+          d.day == now.day &&
+          !s.isRefundRecord;
+    }).toList();
+
+    double todayCash = 0, todayKpay = 0, todayWave = 0, todayCard = 0;
+    for (final s in todaySales) {
+      switch (s.paymentMethod) {
+        case 'cash':
+          todayCash += s.total;
+          break;
+        case 'kpay':
+          todayKpay += s.total;
+          break;
+        case 'wavepay':
+          todayWave += s.total;
+          break;
+        case 'card':
+          todayCard += s.total;
+          break;
+      }
+    }
+    final todayTotal = todayCash + todayKpay + todayWave + todayCard;
+    final todayProfit = todaySales.fold<double>(0, (a, s) => a + s.totalProfit);
+    final hasProfitData = todaySales.any((s) => s.hasProfitData);
+
+    return Container(
+      color: AppColors.card,
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Today's breakdown ─────────────────────────────────────────────
+          Text('ယနေ့ ရောင်းချမှု',
+              style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary)),
+          const SizedBox(height: 6),
+          Row(children: [
+            _PayBadge(
+                label: 'ငွေသား',
+                amount: todayCash,
+                color: const Color(0xFF2D8CFF),
+                icon: Icons.payments_rounded),
+            if (todayKpay > 0) ...[
+              const SizedBox(width: 6),
+              _PayBadge(
+                  label: 'KPay',
+                  amount: todayKpay,
+                  color: const Color(0xFF00A0DC),
+                  assetImage: 'assets/icons/kpay.png'),
+            ],
+            if (todayWave > 0) ...[
+              const SizedBox(width: 6),
+              _PayBadge(
+                  label: 'WavePay',
+                  amount: todayWave,
+                  color: const Color(0xFF7B2FF7),
+                  assetImage: 'assets/icons/wavepay.png'),
+            ],
+            if (todayCard > 0) ...[
+              const SizedBox(width: 6),
+              _PayBadge(
+                  label: 'ကတ်',
+                  amount: todayCard,
+                  color: const Color(0xFF43A047),
+                  icon: Icons.credit_card_rounded),
+            ],
+          ]),
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('ယနေ့ စုစုပေါင်း',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.primary)),
+                Text(fmtPrice(todayTotal),
+                    style: GoogleFonts.poppins(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.primary)),
+              ],
             ),
           ),
-        ),
-        Expanded(
-          child: Obx(() {
-            if (widget.pos.isLoadingHistory.value) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (widget.pos.salesHistory.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.receipt_long_outlined,
-                        size: 56, color: AppColors.textLight),
-                    const SizedBox(height: 12),
-                    Text('No sales yet',
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFF27AE60).withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(children: [
+                  const Icon(Icons.trending_up_rounded,
+                      size: 14, color: Color(0xFF27AE60)),
+                  const SizedBox(width: 4),
+                  Text('ယနေ့ အမြတ်',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: const Color(0xFF27AE60))),
+                ]),
+                hasProfitData
+                    ? Text(fmtPrice(todayProfit),
                         style: GoogleFonts.poppins(
-                            fontSize: 16, color: AppColors.textMedium)),
-                  ],
-                ),
-              );
-            }
-            final list = _filtered(widget.pos.salesHistory);
-            if (list.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.search_off_rounded,
-                        size: 56, color: AppColors.textLight),
-                    const SizedBox(height: 12),
-                    Text('No results for "$_query"',
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: const Color(0xFF27AE60)))
+                    : Text('မရှိသေး',
                         style: GoogleFonts.poppins(
-                            fontSize: 14, color: AppColors.textMedium)),
-                  ],
-                ),
-              );
-            }
-            return ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: list.length,
-              itemBuilder: (_, i) {
-                final sale = list[i];
-                final isRefund = sale.isRefundRecord;
-                final isRefunded = sale.isRefunded;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  color: AppColors.card,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    child: Row(
-                      children: [
-                        // Icon
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: isRefund
-                                ? AppColors.secondary.withValues(alpha: 0.12)
-                                : AppColors.primary.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(10),
+                            fontSize: 11, color: AppColors.textMedium)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Divider(height: 1),
+          const SizedBox(height: 10),
+
+          // ── Header ────────────────────────────────────────────────────────
+          Row(children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('နေ့စဉ် ရောင်းချမှု',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                  Text(
+                    '${DateFormat('dd MMM').format(_chartFrom)} – ${DateFormat('dd MMM').format(_chartTo)}',
+                    style: GoogleFonts.poppins(
+                        fontSize: 10, color: AppColors.textMedium),
+                  ),
+                ],
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: _pickChartRange,
+              icon: const Icon(Icons.date_range_rounded, size: 14),
+              label: Text('ကာလ',
+                  style: GoogleFonts.poppins(
+                      fontSize: 11, fontWeight: FontWeight.w500)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.primary,
+                side:
+                    BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ]),
+          const SizedBox(height: 12),
+
+          // ── Bar chart ─────────────────────────────────────────────────────
+          Expanded(
+            child: _chartLoading
+                ? const Center(child: CircularProgressIndicator())
+                : sortedDays.isEmpty
+                    ? Center(
+                        child: Text('ဤကာလ ရောင်းချမှု မရှိပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 12, color: AppColors.textMedium)))
+                    : BarChart(
+                        BarChartData(
+                          maxY: yMax,
+                          minY: 0,
+                          barGroups: sortedDays.asMap().entries.map((e) {
+                            final revenue = _chartData[e.value] ?? 0;
+                            return BarChartGroupData(
+                              x: e.key,
+                              barRods: [
+                                BarChartRodData(
+                                  toY: revenue,
+                                  width: (180 / sortedDays.length)
+                                      .clamp(5.0, 18.0),
+                                  borderRadius: const BorderRadius.vertical(
+                                      top: Radius.circular(4)),
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      AppColors.primary,
+                                      AppColors.primary.withValues(alpha: 0.5),
+                                    ],
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
+                          titlesData: FlTitlesData(
+                            topTitles: const AxisTitles(
+                                sideTitles: SideTitles(showTitles: false)),
+                            rightTitles: const AxisTitles(
+                                sideTitles: SideTitles(showTitles: false)),
+                            leftTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 40,
+                                interval: yMax / 4,
+                                getTitlesWidget: (v, _) {
+                                  if (v == 0) return const SizedBox.shrink();
+                                  return Text(_fmtK(v),
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 8,
+                                          color: AppColors.textMedium));
+                                },
+                              ),
+                            ),
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 22,
+                                getTitlesWidget: (v, _) {
+                                  final i = v.toInt();
+                                  if (i >= sortedDays.length) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  final step = sortedDays.length <= 7
+                                      ? 1
+                                      : sortedDays.length <= 14
+                                          ? 2
+                                          : 7;
+                                  if (i % step != 0) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Padding(
+                                    padding: const EdgeInsets.only(top: 3),
+                                    child: Text(
+                                      DateFormat('dd/MM').format(sortedDays[i]),
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 8,
+                                          color: AppColors.textMedium),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
                           ),
-                          child: Icon(
-                            isRefund
-                                ? Icons.undo_rounded
-                                : Icons.receipt_rounded,
-                            color: isRefund
-                                ? AppColors.secondary
-                                : AppColors.primary,
+                          gridData: FlGridData(
+                            drawVerticalLine: false,
+                            horizontalInterval: yMax / 4,
+                            getDrawingHorizontalLine: (_) => FlLine(
+                              color: AppColors.border.withValues(alpha: 0.5),
+                              strokeWidth: 0.5,
+                            ),
+                          ),
+                          borderData: FlBorderData(show: false),
+                          barTouchData: BarTouchData(
+                            touchTooltipData: BarTouchTooltipData(
+                              getTooltipColor: (_) => AppColors.textPrimary,
+                              tooltipRoundedRadius: 8,
+                              getTooltipItem: (group, _, rod, __) {
+                                final day = sortedDays[group.x];
+                                return BarTooltipItem(
+                                  '${DateFormat('dd MMM').format(day)}\n${fmtPrice(rod.toY)}',
+                                  GoogleFonts.poppins(
+                                      fontSize: 10,
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600),
+                                );
+                              },
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        // Info
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                      ),
+          ),
+
+          // ── Summary stats ─────────────────────────────────────────────────
+          if (!_chartLoading && _chartData.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            const Divider(height: 1),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: _MiniStat(
+                  label: 'စုစုပေါင်း',
+                  value: fmtPrice(total),
+                  color: AppColors.primary,
+                ),
+              ),
+              Expanded(
+                child: _MiniStat(
+                  label: 'ရောင်းချသောနေ့',
+                  value: '$activeDays ရက်',
+                  color: AppColors.accent,
+                ),
+              ),
+              Expanded(
+                child: _MiniStat(
+                  label: 'ပျမ်းမျှ/နေ့',
+                  value: fmtPrice(activeDays > 0 ? total / activeDays : 0),
+                  color: AppColors.textMedium,
+                ),
+              ),
+            ]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── Left: Sales list ────────────────────────────────────────────────
+        Expanded(
+          flex: 55,
+          child: Column(
+            children: [
+              // Search bar
+              Container(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                color: AppColors.card,
+                child: TextField(
+                  controller: _searchCtrl,
+                  onChanged: (v) => setState(() => _query = v),
+                  style: GoogleFonts.poppins(
+                      fontSize: 14, color: AppColors.textPrimary),
+                  decoration: InputDecoration(
+                    hintText: 'ID၊ ကက်ရှယာ၊ ကုန်ပစ္စည်းဖြင့် ရှာမည်...',
+                    prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                    suffixIcon: _query.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            onPressed: () {
+                              _searchCtrl.clear();
+                              setState(() => _query = '');
+                            },
+                          )
+                        : null,
+                    filled: true,
+                    fillColor: AppColors.bg,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Obx(() {
+                  if (widget.pos.isLoadingHistory.value) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (widget.pos.salesHistory.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.receipt_long_outlined,
+                              size: 56, color: AppColors.textLight),
+                          const SizedBox(height: 12),
+                          Text('ရောင်းချမှု မရှိသေးပါ',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 16, color: AppColors.textMedium)),
+                        ],
+                      ),
+                    );
+                  }
+                  final list = _filtered(widget.pos.salesHistory);
+                  if (list.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.search_off_rounded,
+                              size: 56, color: AppColors.textLight),
+                          const SizedBox(height: 12),
+                          Text('"$_query" အတွက် ရလဒ် မတွေ့ပါ',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 14, color: AppColors.textMedium)),
+                        ],
+                      ),
+                    );
+                  }
+                  return ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: list.length,
+                    itemBuilder: (_, i) {
+                      final sale = list[i];
+                      final isRefund = sale.isRefundRecord;
+                      final isRefunded = sale.isRefunded;
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        color: AppColors.card,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 12),
+                          child: Row(
                             children: [
-                              Row(children: [
-                                Expanded(
-                                  child: Text(sale.id,
-                                      style: GoogleFonts.poppins(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                          color: AppColors.textPrimary),
-                                      overflow: TextOverflow.ellipsis),
+                              // Icon
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: isRefund
+                                      ? AppColors.secondary
+                                          .withValues(alpha: 0.12)
+                                      : AppColors.primary
+                                          .withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(10),
                                 ),
-                                if (isRefunded)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: AppColors.secondary
-                                          .withValues(alpha: 0.12),
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                    child: Text('REFUNDED',
-                                        style: GoogleFonts.poppins(
-                                            fontSize: 9,
-                                            fontWeight: FontWeight.w700,
-                                            color: AppColors.secondary)),
-                                  ),
-                              ]),
-                              Text(
-                                '${sale.items.length} items • ${sale.paymentMethod.toUpperCase()} • ${sale.cashierName}',
-                                style: GoogleFonts.poppins(
-                                    fontSize: 11, color: AppColors.textMedium),
+                                child: Icon(
+                                  isRefund
+                                      ? Icons.undo_rounded
+                                      : Icons.receipt_rounded,
+                                  color: isRefund
+                                      ? AppColors.secondary
+                                      : AppColors.primary,
+                                ),
                               ),
-                              Text(
-                                DateFormat('dd MMM yyyy, HH:mm')
-                                    .format(sale.createdAt),
-                                style: GoogleFonts.poppins(
-                                    fontSize: 10, color: AppColors.textLight),
+                              const SizedBox(width: 12),
+                              // Info
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(children: [
+                                      Expanded(
+                                        child: Text(sale.id,
+                                            style: GoogleFonts.poppins(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w600,
+                                                color: AppColors.textPrimary),
+                                            overflow: TextOverflow.ellipsis),
+                                      ),
+                                      if (isRefunded)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: AppColors.secondary
+                                                .withValues(alpha: 0.12),
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                          ),
+                                          child: Text('ပြန်အမ်းပြီ',
+                                              style: GoogleFonts.poppins(
+                                                  fontSize: 9,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: AppColors.secondary)),
+                                        ),
+                                    ]),
+                                    Text(
+                                      '${sale.items.length} items • ${sale.paymentMethod.toUpperCase()} • ${sale.cashierName}${sale.staffName.isNotEmpty ? ' • Staff: ${sale.staffName}' : ''}',
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 11,
+                                          color: AppColors.textMedium),
+                                    ),
+                                    Text(
+                                      DateFormat('dd MMM yyyy, HH:mm')
+                                          .format(sale.createdAt),
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 10,
+                                          color: AppColors.textLight),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              // Amount + actions
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    fmtPrice(sale.total),
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        color: isRefund
+                                            ? AppColors.secondary
+                                            : AppColors.primary),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Row(children: [
+                                    // Receipt
+                                    _HistoryActionBtn(
+                                      icon: Icons.print_rounded,
+                                      color: AppColors.primary,
+                                      tooltip: 'View receipt',
+                                      onTap: () => showDialog(
+                                        context: context,
+                                        builder: (_) =>
+                                            _ReceiptDialog(sale: sale),
+                                      ),
+                                    ),
+                                    // Refund (only for completed sales, not refunds)
+                                    if (!isRefund && !isRefunded) ...[
+                                      const SizedBox(width: 6),
+                                      _HistoryActionBtn(
+                                        icon: Icons.undo_rounded,
+                                        color: AppColors.secondary,
+                                        tooltip: 'ပြန်အမ်းရန်',
+                                        onTap: () => showDialog(
+                                          context: context,
+                                          builder: (_) => _RefundDialog(
+                                            sale: sale,
+                                            pos: widget.pos,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ]),
+                                ],
                               ),
                             ],
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        // Amount + actions
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(
-                              fmtPrice(sale.total),
-                              style: GoogleFonts.poppins(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  color: isRefund
-                                      ? AppColors.secondary
-                                      : AppColors.primary),
-                            ),
-                            const SizedBox(height: 6),
-                            Row(children: [
-                              // Receipt
-                              _HistoryActionBtn(
-                                icon: Icons.print_rounded,
-                                color: AppColors.primary,
-                                tooltip: 'View receipt',
-                                onTap: () => showDialog(
-                                  context: context,
-                                  builder: (_) => _ReceiptDialog(sale: sale),
-                                ),
-                              ),
-                              // Refund (only for completed sales, not refunds)
-                              if (!isRefund && !isRefunded) ...[
-                                const SizedBox(width: 6),
-                                _HistoryActionBtn(
-                                  icon: Icons.undo_rounded,
-                                  color: AppColors.secondary,
-                                  tooltip: 'Refund',
-                                  onTap: () => showDialog(
-                                    context: context,
-                                    builder: (_) => _RefundDialog(
-                                      sale: sale,
-                                      pos: widget.pos,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ]),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          }),
+                      );
+                    },
+                  );
+                }),
+              ),
+            ],
+          ),
+        ),
+        Container(width: 1, color: AppColors.border),
+        Expanded(
+          flex: 45,
+          child: Obx(() => _buildChartPanel()),
         ),
       ],
+    );
+  }
+}
+
+class _MiniStat extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color color;
+  const _MiniStat(
+      {required this.label, required this.value, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Text(value,
+            style: GoogleFonts.poppins(
+                fontSize: 12, fontWeight: FontWeight.w700, color: color),
+            textAlign: TextAlign.center),
+        Text(label,
+            style:
+                GoogleFonts.poppins(fontSize: 9, color: AppColors.textMedium),
+            textAlign: TextAlign.center),
+      ],
+    );
+  }
+}
+
+class _PayBadge extends StatelessWidget {
+  final String label;
+  final double amount;
+  final Color color;
+  final IconData? icon;
+  final String? assetImage;
+  const _PayBadge(
+      {required this.label,
+      required this.amount,
+      required this.color,
+      this.icon,
+      this.assetImage});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              if (assetImage != null)
+                Image.asset(assetImage!, width: 18, height: 18)
+              else
+                Icon(icon, size: 14, color: color),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(label,
+                    style: GoogleFonts.poppins(
+                        fontSize: 9, fontWeight: FontWeight.w600, color: color),
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ]),
+            const SizedBox(height: 2),
+            Text(fmtPrice(amount),
+                style: GoogleFonts.poppins(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary),
+                overflow: TextOverflow.ellipsis),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2293,7 +3185,7 @@ class _CashNumpadState extends State<_CashNumpad> {
         const SizedBox(height: 8),
         Row(
           children: [
-            _QuickBtn(label: 'Exact', onTap: () => _quickSet(widget.total)),
+            _QuickBtn(label: 'တိကျသော', onTap: () => _quickSet(widget.total)),
             const SizedBox(width: 6),
             _QuickBtn(label: '5K', onTap: () => _quickSet(5000)),
             const SizedBox(width: 6),
@@ -2342,7 +3234,7 @@ class _CashNumpadState extends State<_CashNumpad> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Change',
+                Text('ငွေအမ်း',
                     style: GoogleFonts.poppins(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -2368,7 +3260,7 @@ class _CashNumpadState extends State<_CashNumpad> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Still needed',
+                Text('ဆက်လိုသည်',
                     style: GoogleFonts.poppins(
                         fontSize: 12, color: AppColors.secondary)),
                 Text(
@@ -2557,7 +3449,7 @@ class _RefundDialogState extends State<_RefundDialog> {
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Refund',
+          Text('ပြန်အမ်းရန်',
               style: GoogleFonts.poppins(
                   fontWeight: FontWeight.w700,
                   fontSize: 16,
@@ -2573,7 +3465,7 @@ class _RefundDialogState extends State<_RefundDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Select items and quantities to refund',
+            Text('ပြန်အမ်းမည့် ပစ္စည်းနှင့် အရေအတွက် ရွေးပါ',
                 style: GoogleFonts.poppins(
                     fontSize: 12, color: AppColors.textMedium)),
             const SizedBox(height: 12),
@@ -2665,7 +3557,7 @@ class _RefundDialogState extends State<_RefundDialog> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Refund Total',
+                Text('ပြန်အမ်းငွေ စုစုပေါင်း',
                     style: GoogleFonts.poppins(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
@@ -2683,7 +3575,7 @@ class _RefundDialogState extends State<_RefundDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: Text('Cancel',
+          child: Text('မလုပ်တော့',
               style: GoogleFonts.poppins(color: AppColors.textMedium)),
         ),
         Obx(() => ElevatedButton.icon(
@@ -2697,7 +3589,7 @@ class _RefundDialogState extends State<_RefundDialog> {
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.undo_rounded, size: 16),
-              label: Text('Confirm Refund',
+              label: Text('ပြန်အမ်းငွေ အတည်ပြုရန်',
                   style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.secondary,
@@ -2750,124 +3642,76 @@ class _PosDashboardTab extends StatefulWidget {
 }
 
 class _PosDashboardTabState extends State<_PosDashboardTab> {
-  late DateTime _from;
-  late DateTime _to;
-  Map<DateTime, double> _chartData = {};
-  bool _chartLoading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    final now = DateTime.now();
-    _to = DateTime(now.year, now.month, now.day);
-    _from = _to.subtract(const Duration(days: 6));
-    _fetchChart();
-  }
-
-  Future<void> _fetchChart() async {
-    setState(() => _chartLoading = true);
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('pos_sales')
-          .get();
-
-      final Map<DateTime, double> map = {};
-      final days = _to.difference(_from).inDays;
-      for (int i = 0; i <= days; i++) {
-        map[_from.add(Duration(days: i))] = 0;
-      }
-
-      for (final doc in snap.docs) {
-        final d = doc.data();
-        if ((d['type'] as String? ?? 'sale') == 'refund') continue;
-        final raw = d['createdAt'];
-        DateTime? dt;
-        if (raw is String) dt = DateTime.tryParse(raw);
-        if (dt == null) continue;
-        final day = DateTime(dt.year, dt.month, dt.day);
-        if (map.containsKey(day)) {
-          map[day] = (map[day] ?? 0) + ((d['total'] as num?)?.toDouble() ?? 0);
-        }
-      }
-
-      if (mounted) setState(() { _chartData = map; _chartLoading = false; });
-    } catch (_) {
-      if (mounted) setState(() => _chartLoading = false);
-    }
-  }
-
-  Future<void> _pickRange() async {
-    final picked = await showDateRangePicker(
-      context: context,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
-      initialDateRange: DateTimeRange(start: _from, end: _to),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: ColorScheme.light(primary: AppColors.primary),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      setState(() {
-        _from = DateTime(picked.start.year, picked.start.month, picked.start.day);
-        _to = DateTime(picked.end.year, picked.end.month, picked.end.day);
-      });
-      _fetchChart();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final items = [
       _DashCardData(
+        icon: Icons.storefront_rounded,
+        title: 'ကုန်ပစ္စည်းများ',
+        subtitle: 'ထည့်ရန် / ပြင်ရန် / ဖျက်ရန်',
+        colorA: const Color(0xFF43A047),
+        colorB: const Color(0xFF1B5E20),
+        onTap: () => context.push('/admin/products'),
+      ),
+      _DashCardData(
         icon: Icons.inventory_2_rounded,
-        title: 'Low Stock',
-        subtitle: 'Items running low',
+        title: 'လျော့နည်းကုန်ပစ္စည်းများ',
+        subtitle: 'ကုန်ပစ္စည်း နည်းပါးနေသည်',
         colorA: const Color(0xFFFF8C00),
         colorB: const Color(0xFFE65100),
-        onTap: () => Navigator.push(context,
-            MaterialPageRoute(builder: (_) => const _LowStockPage())),
+        onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const _LowStockPage())),
       ),
       _DashCardData(
         icon: Icons.devices_rounded,
-        title: 'Hardware',
-        subtitle: 'Scanner & printer',
+        title: 'ဟာ့ဒ်ဝဲ',
+        subtitle: 'စကင်နာ & ပရင်တာ',
         colorA: const Color(0xFF1976D2),
         colorB: const Color(0xFF0D47A1),
-        onTap: () => Navigator.push(context,
-            MaterialPageRoute(builder: (_) => const _HardwarePage())),
+        onTap: () => Navigator.push(
+            context, MaterialPageRoute(builder: (_) => const _HardwarePage())),
       ),
       _DashCardData(
         icon: Icons.receipt_long_rounded,
-        title: 'Receipt',
-        subtitle: 'Customize voucher',
+        title: 'ဘောင်ချာ',
+        subtitle: 'ဘောင်ချာ ပြင်ဆင်ရန်',
         colorA: const Color(0xFF2E7D32),
         colorB: const Color(0xFF1B5E20),
         onTap: () => Navigator.push(context,
             MaterialPageRoute(builder: (_) => const _ReceiptManagementPage())),
       ),
       _DashCardData(
-        icon: Icons.bar_chart_rounded,
-        title: 'Quick Stats',
-        subtitle: "Today's summary",
-        colorA: const Color(0xFF7B1FA2),
+        icon: Icons.show_chart_rounded,
+        title: 'အမြတ်',
+        subtitle: 'ဝင်ငွေ နှင့် ကုန်ကျစ်ရိတ်',
+        colorA: const Color(0xFF00897B),
+        colorB: const Color(0xFF00695C),
+        onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => _ProfitAnalyticsPage(pos: widget.pos))),
+      ),
+      _DashCardData(
+        icon: Icons.people_rounded,
+        title: 'ဝန်ထမ်းများ',
+        subtitle: 'ရောင်းချသူ စီမံရန်',
+        colorA: const Color(0xFF6A1B9A),
         colorB: const Color(0xFF4A148C),
         onTap: () => Navigator.push(context,
-            MaterialPageRoute(builder: (_) => _QuickStatsPage(pos: widget.pos))),
+            MaterialPageRoute(builder: (_) => const _StaffManagementPage())),
       ),
       _DashCardData(
         icon: Icons.print_rounded,
-        title: 'Test Print',
-        subtitle: 'Verify printer output',
+        title: 'စမ်းသပ် ပရင့်ထုတ်ရန်',
+        subtitle: 'ပရင်တာ စစ်ဆေးရန်',
         colorA: const Color(0xFFC62828),
         colorB: const Color(0xFFB71C1C),
         onTap: () {
           final bt = BtPrinterService.to;
           if (!bt.isConnected.value) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('No printer connected. Go to Hardware → Connect.',
+              content: Text(
+                  'ပရင်တာ မချိတ်ဆက်ရသေးပါ။ ဟာ့ဒ်ဝဲ → ချိတ်ဆက်ရန် သွားပါ',
                   style: GoogleFonts.poppins(fontSize: 12)),
               backgroundColor: AppColors.secondary,
               behavior: SnackBarBehavior.floating,
@@ -2878,8 +3722,9 @@ class _PosDashboardTabState extends State<_PosDashboardTab> {
             if (Get.overlayContext != null) {
               Get.snackbar(
                 ok ? 'Test print sent' : 'Print failed',
-                ok ? 'Check your printer for the test page.'
-                   : 'Printer may have disconnected.',
+                ok
+                    ? 'Check your printer for the test page.'
+                    : 'Printer may have disconnected.',
                 snackPosition: SnackPosition.BOTTOM,
                 backgroundColor:
                     ok ? const Color(0xFF2E7D32) : AppColors.secondary,
@@ -2902,13 +3747,13 @@ class _PosDashboardTabState extends State<_PosDashboardTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('POS Dashboard',
+              Text('POS ဒက်ရ်ှဘုတ်',
                   style: GoogleFonts.poppins(
                       fontSize: 20,
                       fontWeight: FontWeight.w800,
                       color: AppColors.textPrimary)),
               const SizedBox(height: 2),
-              Text('Tap a section to manage',
+              Text('စီမံရန် တစ်ဆောင်ရာ နှိပ်ပါ',
                   style: GoogleFonts.poppins(
                       fontSize: 12, color: AppColors.textMedium)),
               const SizedBox(height: 20),
@@ -2920,14 +3765,6 @@ class _PosDashboardTabState extends State<_PosDashboardTab> {
                 mainAxisSpacing: 14,
                 childAspectRatio: ratio,
                 children: items.map((d) => _DashCard(data: d)).toList(),
-              ),
-              const SizedBox(height: 24),
-              _SalesTrendCard(
-                data: _chartData,
-                loading: _chartLoading,
-                from: _from,
-                to: _to,
-                onPickRange: _pickRange,
               ),
             ],
           ),
@@ -3030,279 +3867,6 @@ class _DashCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sales Trend Chart Card
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SalesTrendCard extends StatelessWidget {
-  final Map<DateTime, double> data;
-  final bool loading;
-  final DateTime from;
-  final DateTime to;
-  final VoidCallback onPickRange;
-
-  const _SalesTrendCard({
-    required this.data,
-    required this.loading,
-    required this.from,
-    required this.to,
-    required this.onPickRange,
-  });
-
-  String _fmtK(double v) {
-    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
-    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
-    return v.toStringAsFixed(0);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final sortedDays = data.keys.toList()..sort();
-    final maxVal = data.values.fold(0.0, max);
-    final yMax = maxVal <= 0 ? 1000.0 : maxVal * 1.25;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Header ──────────────────────────────────────────────────────
-          Row(children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Daily Sales',
-                      style: GoogleFonts.poppins(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.textPrimary)),
-                  Text(
-                    '${DateFormat('dd MMM').format(from)} – ${DateFormat('dd MMM yyyy').format(to)}',
-                    style: GoogleFonts.poppins(
-                        fontSize: 11, color: AppColors.textMedium),
-                  ),
-                ],
-              ),
-            ),
-            // Date range picker button
-            OutlinedButton.icon(
-              onPressed: onPickRange,
-              icon: const Icon(Icons.date_range_rounded, size: 15),
-              label: Text('Range',
-                  style: GoogleFonts.poppins(
-                      fontSize: 12, fontWeight: FontWeight.w500)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.primary,
-                side: BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ),
-          ]),
-          const SizedBox(height: 16),
-
-          // ── Chart ────────────────────────────────────────────────────────
-          SizedBox(
-            height: 200,
-            child: loading
-                ? const Center(child: CircularProgressIndicator())
-                : sortedDays.isEmpty
-                    ? Center(
-                        child: Text('No sales in this range',
-                            style: GoogleFonts.poppins(
-                                fontSize: 13,
-                                color: AppColors.textMedium)))
-                    : BarChart(
-                        BarChartData(
-                          maxY: yMax,
-                          minY: 0,
-                          barGroups: sortedDays.asMap().entries.map((e) {
-                            final revenue = data[e.value] ?? 0;
-                            return BarChartGroupData(
-                              x: e.key,
-                              barRods: [
-                                BarChartRodData(
-                                  toY: revenue,
-                                  width: (260 / sortedDays.length)
-                                      .clamp(6.0, 22.0),
-                                  borderRadius: const BorderRadius.vertical(
-                                      top: Radius.circular(5)),
-                                  gradient: LinearGradient(
-                                    colors: [
-                                      AppColors.primary,
-                                      AppColors.primary
-                                          .withValues(alpha: 0.55),
-                                    ],
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                  ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
-                          titlesData: FlTitlesData(
-                            topTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false)),
-                            rightTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false)),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 46,
-                                interval: yMax / 4,
-                                getTitlesWidget: (v, _) {
-                                  if (v == 0) return const SizedBox.shrink();
-                                  return Text(_fmtK(v),
-                                      style: GoogleFonts.poppins(
-                                          fontSize: 9,
-                                          color: AppColors.textMedium));
-                                },
-                              ),
-                            ),
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 24,
-                                getTitlesWidget: (v, _) {
-                                  final i = v.toInt();
-                                  if (i >= sortedDays.length) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  final step = sortedDays.length <= 7
-                                      ? 1
-                                      : sortedDays.length <= 14
-                                          ? 2
-                                          : 7;
-                                  if (i % step != 0) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  return Padding(
-                                    padding: const EdgeInsets.only(top: 4),
-                                    child: Text(
-                                      DateFormat('dd/MM')
-                                          .format(sortedDays[i]),
-                                      style: GoogleFonts.poppins(
-                                          fontSize: 9,
-                                          color: AppColors.textMedium),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                          gridData: FlGridData(
-                            drawVerticalLine: false,
-                            horizontalInterval: yMax / 4,
-                            getDrawingHorizontalLine: (_) => FlLine(
-                              color: AppColors.border.withValues(alpha: 0.5),
-                              strokeWidth: 0.5,
-                            ),
-                          ),
-                          borderData: FlBorderData(show: false),
-                          barTouchData: BarTouchData(
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipColor: (_) => AppColors.textPrimary,
-                              tooltipRoundedRadius: 8,
-                              getTooltipItem: (group, _, rod, __) {
-                                final day = sortedDays[group.x];
-                                return BarTooltipItem(
-                                  '${DateFormat('dd MMM').format(day)}\n${fmtPrice(rod.toY)}',
-                                  GoogleFonts.poppins(
-                                      fontSize: 11,
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w600),
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                      ),
-          ),
-
-          // ── Summary row ──────────────────────────────────────────────────
-          if (!loading && data.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            const Divider(height: 1),
-            const SizedBox(height: 10),
-            Row(children: [
-              _ChartStat(
-                label: 'Total',
-                value: fmtPrice(
-                    data.values.fold<double>(0.0, (a, b) => a + b)),
-                icon: Icons.attach_money_rounded,
-                color: AppColors.primary,
-              ),
-              const SizedBox(width: 16),
-              _ChartStat(
-                label: 'Days',
-                value: data.values
-                    .where((v) => v > 0)
-                    .length
-                    .toString(),
-                icon: Icons.calendar_today_rounded,
-                color: const Color(0xFF2E7D32),
-              ),
-              const SizedBox(width: 16),
-              _ChartStat(
-                label: 'Best Day',
-                value: fmtPrice(maxVal),
-                icon: Icons.trending_up_rounded,
-                color: const Color(0xFF7B1FA2),
-              ),
-            ]),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ChartStat extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color color;
-  const _ChartStat({
-    required this.label,
-    required this.value,
-    required this.icon,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Row(children: [
-        Icon(icon, size: 14, color: color),
-        const SizedBox(width: 5),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(value,
-                  style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.textPrimary),
-                  overflow: TextOverflow.ellipsis),
-              Text(label,
-                  style: GoogleFonts.poppins(
-                      fontSize: 10, color: AppColors.textMedium)),
-            ],
-          ),
-        ),
-      ]),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Low Stock Page
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3318,6 +3882,9 @@ class _LowStockPageState extends State<_LowStockPage> {
   int _threshold = 10;
   List<Map<String, dynamic>> _items = [];
   bool _loading = true;
+
+  static const _amber = Color(0xFFF39C12);
+  static const _green = Color(0xFF27AE60);
 
   @override
   void initState() {
@@ -3365,191 +3932,339 @@ class _LowStockPageState extends State<_LowStockPage> {
       backgroundColor: AppColors.bg,
       appBar: AppBar(
         backgroundColor: AppColors.card,
-        title: Text('Low Stock',
+        title: Text('လျော့နည်းကုန်ပစ္စည်းများ',
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
         iconTheme: IconThemeData(color: AppColors.textPrimary),
         elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _fetch,
-          ),
+              icon: const Icon(Icons.refresh_rounded), onPressed: _fetch),
         ],
       ),
-      body: Column(
-        children: [
-          // Threshold picker
-          Container(
-            color: AppColors.card,
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            child: Row(
-              children: [
-                Text('Alert threshold: ',
-                    style: GoogleFonts.poppins(
-                        fontSize: 13, color: AppColors.textMedium)),
-                Expanded(
-                  child: Slider(
-                    value: _threshold.toDouble(),
-                    min: 1,
-                    max: 50,
-                    divisions: 49,
-                    activeColor: const Color(0xFFF39C12),
-                    label: _threshold.toString(),
-                    onChanged: (v) => setState(() => _threshold = v.toInt()),
-                    onChangeEnd: (v) {
-                      _saveThreshold(v.toInt());
-                      _fetch();
-                    },
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF39C12).withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text('≤ $_threshold',
-                      style: GoogleFonts.poppins(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFFF39C12))),
-                ),
-              ],
+      body: LayoutBuilder(builder: (_, constraints) {
+        final isWide = constraints.maxWidth >= 720;
+        if (isWide) {
+          return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 300, child: _buildLeftPanel()),
+            VerticalDivider(
+                width: 1, thickness: 1, color: AppColors.border),
+            Expanded(child: _buildProductArea(isGrid: true)),
+          ]);
+        }
+        return Column(children: [
+          _buildThresholdBar(),
+          Expanded(child: _buildProductArea(isGrid: false)),
+        ]);
+      }),
+    );
+  }
+
+  Widget _buildThresholdBar() {
+    return Container(
+      color: AppColors.card,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: Row(children: [
+        Text('သတိပေးမှု: ',
+            style: GoogleFonts.poppins(
+                fontSize: 13, color: AppColors.textMedium)),
+        Expanded(
+          child: Slider(
+            value: _threshold.toDouble(),
+            min: 1,
+            max: 50,
+            divisions: 49,
+            activeColor: _amber,
+            label: _threshold.toString(),
+            onChanged: (v) => setState(() => _threshold = v.toInt()),
+            onChangeEnd: (v) { _saveThreshold(v.toInt()); _fetch(); },
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: _amber.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text('≤ $_threshold',
+              style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: _amber)),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildLeftPanel() {
+    final outCount = _items
+        .where((i) => ((i['stock'] as num?)?.toInt() ?? 0) == 0)
+        .length;
+    final lowCount = _items.length - outCount;
+
+    return Container(
+      color: AppColors.card,
+      height: double.infinity,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Text('ကုန်ပစ္စည်း အနေအထား',
+              style: GoogleFonts.poppins(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary)),
+          const SizedBox(height: 16),
+          _buildStatCard(
+            icon: Icons.remove_shopping_cart_rounded,
+            label: 'ကုန်ပစ္စည်း မရှိ',
+            count: outCount,
+            color: AppColors.secondary,
+          ),
+          const SizedBox(height: 10),
+          _buildStatCard(
+            icon: Icons.warning_amber_rounded,
+            label: 'လျော့နည်းနေသော',
+            count: lowCount,
+            color: _amber,
+          ),
+          const SizedBox(height: 10),
+          _buildStatCard(
+            icon: Icons.inventory_2_rounded,
+            label: 'ထောက်လှမ်းမှု စုစုပေါင်း',
+            count: _items.length,
+            color: AppColors.primary,
+          ),
+          const SizedBox(height: 24),
+          Divider(color: AppColors.border, height: 1),
+          const SizedBox(height: 20),
+          Text('သတိပေးမှု စံနှုန်း',
+              style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textPrimary)),
+          const SizedBox(height: 4),
+          Text('Stock ≤ $_threshold ဖြစ်သောကုန်ပစ္စည်းများ ပြသည်',
+              style: GoogleFonts.poppins(
+                  fontSize: 11, color: AppColors.textMedium)),
+          Slider(
+            value: _threshold.toDouble(),
+            min: 1,
+            max: 50,
+            divisions: 49,
+            activeColor: _amber,
+            label: _threshold.toString(),
+            onChanged: (v) => setState(() => _threshold = v.toInt()),
+            onChangeEnd: (v) { _saveThreshold(v.toInt()); _fetch(); },
+          ),
+          Center(
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+              decoration: BoxDecoration(
+                color: _amber.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text('≤ $_threshold ခု',
+                  style: GoogleFonts.poppins(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: _amber)),
             ),
           ),
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : _items.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.check_circle_outline_rounded,
-                                size: 56, color: const Color(0xFF27AE60)),
-                            const SizedBox(height: 12),
-                            Text('All products are well-stocked',
-                                style: GoogleFonts.poppins(
-                                    fontSize: 15, color: AppColors.textMedium)),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _items.length,
-                        itemBuilder: (_, i) {
-                          final item = _items[i];
-                          final stock = (item['stock'] as num?)?.toInt() ?? 0;
-                          final isOut = stock == 0;
-                          final color = isOut
-                              ? AppColors.secondary
-                              : const Color(0xFFF39C12);
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            color: AppColors.card,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12)),
-                            child: ListTile(
-                              leading: _LowStockThumb(
-                                item: item,
-                                color: color,
-                                isOut: isOut,
-                              ),
-                              title: Text(item['name'] ?? '',
-                                  style: GoogleFonts.poppins(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary)),
-                              subtitle: Text(
-                                  item['brand'] != null &&
-                                          (item['brand'] as String).isNotEmpty
-                                      ? item['brand'] as String
-                                      : 'No brand',
-                                  style: GoogleFonts.poppins(
-                                      fontSize: 11,
-                                      color: AppColors.textMedium)),
-                              trailing: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: color.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  isOut ? 'OUT' : 'Qty: $stock',
-                                  style: GoogleFonts.poppins(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w700,
-                                      color: color),
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-          ),
-        ],
+        ]),
       ),
     );
   }
-}
 
-class _LowStockThumb extends StatelessWidget {
-  final Map<String, dynamic> item;
-  final Color color;
-  final bool isOut;
-  const _LowStockThumb({
-    required this.item,
-    required this.color,
-    required this.isOut,
-  });
+  Widget _buildStatCard({
+    required IconData icon,
+    required String label,
+    required int count,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Row(children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.15),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, size: 20, color: color),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(label,
+              style: GoogleFonts.poppins(
+                  fontSize: 12, color: AppColors.textMedium)),
+        ),
+        Text('$count',
+            style: GoogleFonts.poppins(
+                fontSize: 26, fontWeight: FontWeight.w800, color: color)),
+      ]),
+    );
+  }
 
-  @override
-  Widget build(BuildContext context) {
-    final raw = (item['thumbnail'] as String? ?? '').isNotEmpty
+  Widget _buildProductArea({required bool isGrid}) {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_items.isEmpty) {
+      return Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.check_circle_outline_rounded,
+              size: 64, color: _green),
+          const SizedBox(height: 14),
+          Text('ကုန်ပစ္စည်းအားလုံး လုံလောက်စွာ ရှိသည်',
+              style: GoogleFonts.poppins(
+                  fontSize: 15, color: AppColors.textMedium)),
+        ]),
+      );
+    }
+    if (isGrid) {
+      return GridView.builder(
+        padding: const EdgeInsets.all(16),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          childAspectRatio: 3.4,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+        ),
+        itemCount: _items.length,
+        itemBuilder: (_, i) => _buildProductCard(_items[i]),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _items.length,
+      itemBuilder: (_, i) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: _buildProductCard(_items[i]),
+      ),
+    );
+  }
+
+  Widget _buildProductCard(Map<String, dynamic> item) {
+    final stock = (item['stock'] as num?)?.toInt() ?? 0;
+    final isOut = stock == 0;
+    final color = isOut ? AppColors.secondary : _amber;
+    final progress =
+        _threshold > 0 ? (stock / _threshold).clamp(0.0, 1.0) : 0.0;
+
+    final rawUrl = (item['thumbnail'] as String? ?? '').isNotEmpty
         ? item['thumbnail'] as String
         : ((item['images'] as List?)?.isNotEmpty == true
             ? (item['images'] as List).first as String
             : '');
-    final url = AppConstants.fixImageUrl(raw);
+    final url = AppConstants.fixImageUrl(rawUrl);
+    final brand = (item['brand'] as String? ?? '');
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: 48,
-        height: 48,
-        child: url.isNotEmpty
-            ? CachedNetworkImage(
-                imageUrl: url,
-                fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
-                  color: color.withValues(alpha: 0.12),
-                  child: Icon(Icons.image_outlined, color: color, size: 20),
+    final thumb = url.isNotEmpty
+        ? CachedNetworkImage(
+            imageUrl: url,
+            fit: BoxFit.cover,
+            placeholder: (_, __) => Container(
+              color: color.withValues(alpha: 0.1),
+              child: Icon(Icons.image_outlined, color: color, size: 22),
+            ),
+            errorWidget: (_, __, ___) => Container(
+              color: color.withValues(alpha: 0.1),
+              child: Icon(
+                isOut
+                    ? Icons.remove_shopping_cart_rounded
+                    : Icons.warning_amber_rounded,
+                color: color,
+                size: 22,
+              ),
+            ),
+          )
+        : Container(
+            color: color.withValues(alpha: 0.1),
+            child: Icon(
+              isOut
+                  ? Icons.remove_shopping_cart_rounded
+                  : Icons.warning_amber_rounded,
+              color: color,
+              size: 22,
+            ),
+          );
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Row(children: [
+        ClipRRect(
+          borderRadius:
+              const BorderRadius.horizontal(left: Radius.circular(12)),
+          child: SizedBox(width: 64, child: thumb),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  item['name'] ?? '',
+                  style: GoogleFonts.poppins(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                errorWidget: (_, __, ___) => Container(
-                  color: color.withValues(alpha: 0.12),
-                  child: Icon(
-                    isOut
-                        ? Icons.remove_shopping_cart_rounded
-                        : Icons.warning_amber_rounded,
-                    color: color,
-                    size: 20,
+                if (brand.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(brand,
+                      style: GoogleFonts.poppins(
+                          fontSize: 10, color: AppColors.textMedium),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                ],
+                const SizedBox(height: 7),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    backgroundColor: color.withValues(alpha: 0.12),
+                    valueColor: AlwaysStoppedAnimation<Color>(color),
+                    minHeight: 4,
                   ),
                 ),
-              )
-            : Container(
-                color: color.withValues(alpha: 0.12),
-                child: Icon(
-                  isOut
-                      ? Icons.remove_shopping_cart_rounded
-                      : Icons.warning_amber_rounded,
-                  color: color,
-                  size: 20,
-                ),
-              ),
-      ),
+              ],
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              isOut ? 'OUT' : '$stock',
+              style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: color),
+            ),
+          ),
+        ),
+      ]),
     );
   }
 }
@@ -3589,7 +4304,7 @@ class _HardwarePageState extends State<_HardwarePage> {
       backgroundColor: AppColors.bg,
       appBar: AppBar(
         backgroundColor: AppColors.card,
-        title: Text('Hardware',
+        title: Text('ဟာ့ဒ်ဝဲ',
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
         iconTheme: IconThemeData(color: AppColors.textPrimary),
@@ -3602,7 +4317,7 @@ class _HardwarePageState extends State<_HardwarePage> {
           _SectionCard(
             icon: Icons.print_rounded,
             iconColor: const Color(0xFF2980B9),
-            title: 'Receipt Paper Size',
+            title: 'ဘောင်ချာ စာရွက် အရွယ်',
             child: Column(
               children: [58, 80].map((w) {
                 final selected = _paperWidth == w;
@@ -3639,7 +4354,7 @@ class _HardwarePageState extends State<_HardwarePage> {
             return _SectionCard(
               icon: Icons.bluetooth_rounded,
               iconColor: const Color(0xFF2980B9),
-              title: 'Bluetooth Printer',
+              title: 'ဘလူးတုသ် ပရင်တာ',
               child: ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text(
@@ -3652,7 +4367,7 @@ class _HardwarePageState extends State<_HardwarePage> {
                 ),
                 trailing: TextButton(
                   onPressed: () => _showBtDialog(context),
-                  child: Text(connected ? 'Manage' : 'Connect',
+                  child: Text(connected ? 'Manage' : 'ချိတ်ဆက်ရန်',
                       style: GoogleFonts.poppins(color: AppColors.primary)),
                 ),
               ),
@@ -3664,7 +4379,7 @@ class _HardwarePageState extends State<_HardwarePage> {
           _SectionCard(
             icon: Icons.qr_code_scanner_rounded,
             iconColor: const Color(0xFF27AE60),
-            title: 'Barcode Scanner (BT HID)',
+            title: 'ဘားကုဒ် စကင်နာ (BT HID)',
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
               child: Column(
@@ -3724,14 +4439,15 @@ class _HardwarePageState extends State<_HardwarePage> {
               return _SectionCard(
                 icon: Icons.wifi_rounded,
                 iconColor: const Color(0xFF00897B),
-                title: 'Network Barcode (WiFi)',
+                title: 'ကွန်ရက် ဘားကုဒ် (WiFi)',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Status row
                     Row(children: [
                       Container(
-                        width: 8, height: 8,
+                        width: 8,
+                        height: 8,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           color: running
@@ -3775,8 +4491,7 @@ class _HardwarePageState extends State<_HardwarePage> {
                           Expanded(
                             child: Text(err,
                                 style: GoogleFonts.poppins(
-                                    fontSize: 10,
-                                    color: AppColors.secondary)),
+                                    fontSize: 10, color: AppColors.secondary)),
                           ),
                         ]),
                       ),
@@ -3788,8 +4503,7 @@ class _HardwarePageState extends State<_HardwarePage> {
                       Row(children: [
                         Expanded(
                           flex: 3,
-                          child: _ConnInfoBox(
-                              label: 'IP Address', value: ip),
+                          child: _ConnInfoBox(label: 'IP လိပ်စာ', value: ip),
                         ),
                         const SizedBox(width: 10),
                         Expanded(
@@ -3814,12 +4528,11 @@ class _HardwarePageState extends State<_HardwarePage> {
                             }
                           },
                           icon: const Icon(Icons.copy_rounded, size: 15),
-                          label: Text('Copy $ip:$p',
+                          label: Text('$ip:$p ကူးရန်',
                               style: GoogleFonts.poppins(fontSize: 12)),
                           style: OutlinedButton.styleFrom(
                             foregroundColor: const Color(0xFF00897B),
-                            side: const BorderSide(
-                                color: Color(0xFF00897B)),
+                            side: const BorderSide(color: Color(0xFF00897B)),
                           ),
                         ),
                       ),
@@ -3831,10 +4544,9 @@ class _HardwarePageState extends State<_HardwarePage> {
                         Icon(Icons.qr_code_rounded,
                             size: 14, color: AppColors.textLight),
                         const SizedBox(width: 6),
-                        Text('Last received: $last',
+                        Text('နောက်ဆုံး လက်ခံသည်: $last',
                             style: GoogleFonts.poppins(
-                                fontSize: 11,
-                                color: AppColors.textMedium)),
+                                fontSize: 11, color: AppColors.textMedium)),
                       ]),
                     ],
                   ],
@@ -3853,7 +4565,7 @@ class _HardwarePageState extends State<_HardwarePage> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.card,
-        title: Text('Bluetooth Printer',
+        title: Text('ဘလူးတုသ် ပရင်တာ',
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
         content: SizedBox(
@@ -3868,14 +4580,14 @@ class _HardwarePageState extends State<_HardwarePage> {
             }
             if (devices.isEmpty) {
               return Column(mainAxisSize: MainAxisSize.min, children: [
-                Text('No paired devices found.',
+                Text('ချိတ်ဆက်ထားသော ကိရိယာ မတွေ့ပါ',
                     style: GoogleFonts.poppins(
                         fontSize: 13, color: AppColors.textMedium)),
                 const SizedBox(height: 12),
                 ElevatedButton.icon(
                   onPressed: bt.loadPairedDevices,
                   icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('Scan again'),
+                  label: const Text('ထပ်မံ စကင်ရန်'),
                 ),
               ]);
             }
@@ -3901,7 +4613,7 @@ class _HardwarePageState extends State<_HardwarePage> {
                   trailing: isThis
                       ? TextButton(
                           onPressed: bt.disconnect,
-                          child: Text('Disconnect',
+                          child: Text('ချိတ်ဆက်မှု ဖြတ်ရန်',
                               style: GoogleFonts.poppins(
                                   color: AppColors.secondary)))
                       : Obx(() => bt.isConnecting.value
@@ -3911,7 +4623,7 @@ class _HardwarePageState extends State<_HardwarePage> {
                               child: CircularProgressIndicator(strokeWidth: 2))
                           : TextButton(
                               onPressed: () => bt.connect(d),
-                              child: Text('Connect',
+                              child: Text('ချိတ်ဆက်ရန်',
                                   style: GoogleFonts.poppins(
                                       color: AppColors.primary)))),
                 );
@@ -3922,7 +4634,7 @@ class _HardwarePageState extends State<_HardwarePage> {
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Close'))
+              child: const Text('ပိတ်ရန်'))
         ],
       ),
     );
@@ -4118,163 +4830,272 @@ class _ReceiptManagementPageState extends State<_ReceiptManagementPage> {
     if (mounted) {
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Receipt settings saved', style: GoogleFonts.poppins()),
+        content:
+            Text('ဘောင်ချာ ဆက်တင် သိမ်းဆည်းပြီ', style: GoogleFonts.poppins()),
         backgroundColor: const Color(0xFF27AE60),
         behavior: SnackBarBehavior.floating,
       ));
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.card,
-        title: Text('Receipt Management',
-            style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        iconTheme: IconThemeData(color: AppColors.textPrimary),
-        elevation: 0,
-        actions: [
-          _saving
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2)))
-              : TextButton(
-                  onPressed: _save,
-                  child: Text('Save',
-                      style: GoogleFonts.poppins(
-                          color: AppColors.primary,
-                          fontWeight: FontWeight.w600))),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          // ── Store Info ──────────────────────────────────────────────────
-          _SectionCard(
-            icon: Icons.store_rounded,
-            iconColor: const Color(0xFF27AE60),
-            title: 'Store Info',
-            child: Column(children: [
-              _LabeledField(
-                label: 'Store Name',
-                controller: _nameCtrl,
-                hint: 'e.g. TSfootwear',
-              ),
-              const SizedBox(height: 12),
-              _LabeledField(
-                label: 'Store Address',
-                controller: _addressCtrl,
-                hint: 'e.g. 54 St, 115D Corner',
-              ),
-            ]),
-          ),
-          const SizedBox(height: 14),
+  // ── Section helpers ──────────────────────────────────────────────────────
 
-          // ── Footer ──────────────────────────────────────────────────────
-          _SectionCard(
-            icon: Icons.format_quote_rounded,
-            iconColor: const Color(0xFF8E44AD),
-            title: 'Footer Message',
-            child: _LabeledField(
-              label: 'Footer Text',
-              controller: _footerCtrl,
-              hint: 'e.g. Thank you! Come again.',
-            ),
+  Widget _buildStoreInfoCard() => _SectionCard(
+        icon: Icons.store_rounded,
+        iconColor: const Color(0xFF27AE60),
+        title: 'ဆိုင် အချက်အလက်',
+        child: Column(children: [
+          _LabeledField(
+            label: 'ဆိုင် နာမည်',
+            controller: _nameCtrl,
+            hint: 'e.g. TSfootwear',
           ),
-          const SizedBox(height: 14),
-
-          // ── Show / Hide Fields ──────────────────────────────────────────
-          _SectionCard(
-            icon: Icons.visibility_rounded,
-            iconColor: const Color(0xFF2980B9),
-            title: 'Show on Receipt',
-            child: Column(children: [
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text('Receipt ID',
-                    style: GoogleFonts.poppins(
-                        fontSize: 13, color: AppColors.textPrimary)),
-                value: _showId,
-                activeThumbColor: AppColors.primary,
-                onChanged: (v) => setState(() => _showId = v),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text('Date & Time',
-                    style: GoogleFonts.poppins(
-                        fontSize: 13, color: AppColors.textPrimary)),
-                value: _showDate,
-                activeThumbColor: AppColors.primary,
-                onChanged: (v) => setState(() => _showDate = v),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text('Cashier Name',
-                    style: GoogleFonts.poppins(
-                        fontSize: 13, color: AppColors.textPrimary)),
-                value: _showCashier,
-                activeThumbColor: AppColors.primary,
-                onChanged: (v) => setState(() => _showCashier = v),
-              ),
-            ]),
+          const SizedBox(height: 12),
+          _LabeledField(
+            label: 'ဆိုင် လိပ်စာ',
+            controller: _addressCtrl,
+            hint: 'e.g. 54 St, 115D Corner',
           ),
-          const SizedBox(height: 14),
+        ]),
+      );
 
-          // ── Preview ─────────────────────────────────────────────────────
-          _SectionCard(
-            icon: Icons.preview_rounded,
-            iconColor: const Color(0xFFF39C12),
-            title: 'Receipt Preview',
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: DefaultTextStyle(
-                style: const TextStyle(
-                    fontFamily: 'Courier', fontSize: 11, color: Colors.black),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
+  Widget _buildFooterCard() => _SectionCard(
+        icon: Icons.format_quote_rounded,
+        iconColor: const Color(0xFF8E44AD),
+        title: 'အောက်ခြေ မက်ဆေ့ချ်',
+        child: _LabeledField(
+          label: 'အောက်ခြေ စာသား',
+          controller: _footerCtrl,
+          hint: 'e.g. Thank you! Come again.',
+        ),
+      );
+
+  Widget _buildTogglesCard() => _SectionCard(
+        icon: Icons.visibility_rounded,
+        iconColor: const Color(0xFF2980B9),
+        title: 'ဘောင်ချာတွင် ပြသရန်',
+        child: Column(children: [
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('ဘောင်ချာ ID',
+                style: GoogleFonts.poppins(
+                    fontSize: 13, color: AppColors.textPrimary)),
+            value: _showId,
+            activeThumbColor: AppColors.primary,
+            onChanged: (v) => setState(() => _showId = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('ရက်စွဲ & အချိန်',
+                style: GoogleFonts.poppins(
+                    fontSize: 13, color: AppColors.textPrimary)),
+            value: _showDate,
+            activeThumbColor: AppColors.primary,
+            onChanged: (v) => setState(() => _showDate = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('ကက်ရှယာ နာမည်',
+                style: GoogleFonts.poppins(
+                    fontSize: 13, color: AppColors.textPrimary)),
+            value: _showCashier,
+            activeThumbColor: AppColors.primary,
+            onChanged: (v) => setState(() => _showCashier = v),
+          ),
+        ]),
+      );
+
+  Widget _buildPreviewCard() => _SectionCard(
+        icon: Icons.preview_rounded,
+        iconColor: const Color(0xFFF39C12),
+        title: 'ဘောင်ချာ ကြိုကြည့်',
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.border),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2)),
+            ],
+          ),
+          child: DefaultTextStyle(
+            style: const TextStyle(
+                fontFamily: 'Courier', fontSize: 12, color: Colors.black),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Text(_nameCtrl.text.isEmpty ? 'ဆိုင် နာမည်' : _nameCtrl.text,
+                    style: const TextStyle(
+                        fontFamily: 'Courier',
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 2),
+                if (_addressCtrl.text.isNotEmpty)
+                  Text(_addressCtrl.text, style: const TextStyle(fontSize: 11)),
+                const SizedBox(height: 6),
+                const _PreviewDash(),
+                if (_showId) _previewRow('Receipt', 'POS-XXXXXXXX'),
+                if (_showDate) _previewRow('Date   ', '01/06/2026 10:00'),
+                if (_showCashier) _previewRow('Cashier', 'Admin'),
+                if (_showId || _showDate || _showCashier) const _PreviewDash(),
+                _previewRow('Product A  x1', '5,000'),
+                _previewRow('Product B  x2', '10,000'),
+                const _PreviewDash(),
+                _previewRow('Subtotal', '15,000'),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(_nameCtrl.text.isEmpty ? 'Store Name' : _nameCtrl.text,
-                        style: const TextStyle(
-                            fontFamily: 'Courier',
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold)),
-                    if (_addressCtrl.text.isNotEmpty) Text(_addressCtrl.text),
-                    const Text('--------------------------------'),
-                    if (_showId) const Text('Receipt: POS-XXXXXXXX'),
-                    if (_showDate) const Text('Date   : 01/06/2026 10:00'),
-                    if (_showCashier) const Text('Cashier: Admin'),
-                    const Text('--------------------------------'),
-                    const Text('Product A x1          5,000'),
-                    const Text('Product B x2         10,000'),
-                    const Text('--------------------------------'),
-                    const Text('Subtotal             15,000'),
-                    const Text('TOTAL                15,000',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                    const Text('--------------------------------'),
-                    Text(_footerCtrl.text.isEmpty
-                        ? 'Thank you!'
-                        : _footerCtrl.text),
+                    const Text('TOTAL',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 14)),
+                    const Text('15,000',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 14)),
                   ],
                 ),
-              ),
+                const SizedBox(height: 6),
+                const _PreviewDash(),
+                const SizedBox(height: 4),
+                Text(
+                  _footerCtrl.text.isEmpty ? 'Thank you!' : _footerCtrl.text,
+                  style: const TextStyle(fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+              ],
             ),
           ),
-        ],
+        ),
+      );
+
+  Widget _previewRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 1),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 11)),
+            Text(value, style: const TextStyle(fontSize: 11)),
+          ],
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final appBar = AppBar(
+      backgroundColor: AppColors.card,
+      title: Text('ဘောင်ချာ စီမံခြင်း',
+          style: GoogleFonts.poppins(
+              fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+      iconTheme: IconThemeData(color: AppColors.textPrimary),
+      elevation: 0,
+      actions: [
+        _saving
+            ? const Padding(
+                padding: EdgeInsets.all(16),
+                child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2)))
+            : TextButton(
+                onPressed: _save,
+                child: Text('သိမ်းဆည်းရန်',
+                    style: GoogleFonts.poppins(
+                        color: AppColors.primary,
+                        fontWeight: FontWeight.w600))),
+      ],
+    );
+
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      appBar: appBar,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          // ── Tablet landscape: side-by-side ─────────────────────────────
+          if (constraints.maxWidth >= 720) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Left panel – all controls
+                Expanded(
+                  flex: 44,
+                  child: ListView(
+                    padding: const EdgeInsets.all(20),
+                    children: [
+                      _buildStoreInfoCard(),
+                      const SizedBox(height: 14),
+                      _buildFooterCard(),
+                      const SizedBox(height: 14),
+                      _buildTogglesCard(),
+                      const SizedBox(height: 20),
+                    ],
+                  ),
+                ),
+                Container(width: 1, color: AppColors.border),
+                // Right panel – live receipt preview
+                Expanded(
+                  flex: 56,
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('ကြိုကြည့်',
+                            style: GoogleFonts.poppins(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textMedium)),
+                        const SizedBox(height: 10),
+                        _buildPreviewCard(),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          // ── Phone / portrait: single column ────────────────────────────
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _buildStoreInfoCard(),
+              const SizedBox(height: 14),
+              _buildFooterCard(),
+              const SizedBox(height: 14),
+              _buildTogglesCard(),
+              const SizedBox(height: 14),
+              _buildPreviewCard(),
+            ],
+          );
+        },
       ),
     );
   }
+}
+
+class _PreviewDash extends StatelessWidget {
+  const _PreviewDash();
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: SizedBox(
+          width: double.infinity,
+          child: Text(
+            '-' * 200,
+            softWrap: false,
+            overflow: TextOverflow.clip,
+            style: const TextStyle(
+                fontFamily: 'Courier', fontSize: 11, color: Colors.black54),
+          ),
+        ),
+      );
 }
 
 class _LabeledField extends StatelessWidget {
@@ -4322,124 +5143,780 @@ class _LabeledField extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Quick Stats Page
+// Profit Analytics Page
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _QuickStatsPage extends StatefulWidget {
+class _ProfitAnalyticsPage extends StatefulWidget {
   final PosController pos;
-  const _QuickStatsPage({required this.pos});
+  const _ProfitAnalyticsPage({required this.pos});
 
   @override
-  State<_QuickStatsPage> createState() => _QuickStatsPageState();
+  State<_ProfitAnalyticsPage> createState() => _ProfitAnalyticsPageState();
 }
 
-class _QuickStatsPageState extends State<_QuickStatsPage> {
+class _ProfitAnalyticsPageState extends State<_ProfitAnalyticsPage> {
+  late DateTime _from;
+  late DateTime _to;
+
+  bool _loading = true;
+
+  // Daily chart (within selected range)
+  Map<DateTime, double> _dailyRevenue = {};
+  Map<DateTime, double> _dailyProfit = {};
+
+  // Monthly chart (last 12 months)
+  final List<String> _monthKeys = []; // "YYYY-MM"
+  Map<String, double> _monthlyRevenue = {};
+  Map<String, double> _monthlyProfit = {};
+
+  // Summary totals
+  double _todayRevenue = 0, _todayProfit = 0;
+  double _monthRevenue = 0, _monthProfit = 0;
+
+  // Top products by profit
+  List<Map<String, dynamic>> _topProducts = [];
+
   @override
   void initState() {
     super.initState();
-    widget.pos.fetchSalesHistory();
+    final now = DateTime.now();
+    _to = DateTime(now.year, now.month, now.day);
+    _from = _to.subtract(const Duration(days: 6));
+    _buildMonthKeys(now);
+    _fetch();
+  }
+
+  void _buildMonthKeys(DateTime now) {
+    for (int i = 11; i >= 0; i--) {
+      final m = DateTime(now.year, now.month - i);
+      _monthKeys.add('${m.year}-${m.month.toString().padLeft(2, '0')}');
+    }
+  }
+
+  Future<void> _fetch() async {
+    setState(() => _loading = true);
+    try {
+      final snap =
+          await FirebaseFirestore.instance.collection('pos_sales').get();
+
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final monthStart = DateTime(now.year, now.month, 1);
+
+      // Initialise daily maps
+      final Map<DateTime, double> dRev = {};
+      final Map<DateTime, double> dProfit = {};
+      final days = _to.difference(_from).inDays;
+      for (int i = 0; i <= days; i++) {
+        final d = _from.add(Duration(days: i));
+        dRev[d] = 0;
+        dProfit[d] = 0;
+      }
+
+      // Initialise monthly maps
+      final Map<String, double> mRev = {for (final k in _monthKeys) k: 0};
+      final Map<String, double> mProfit = {for (final k in _monthKeys) k: 0};
+
+      double todayRev = 0, todayProfit = 0;
+      double monthRev = 0, monthProfit = 0;
+
+      // Top products accumulator: productName → {revenue, profit, qty}
+      final Map<String, Map<String, double>> prodMap = {};
+
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        final isRefund = (d['type'] as String? ?? 'sale') == 'refund';
+
+        final raw = d['createdAt'];
+        DateTime? dt;
+        if (raw is String) dt = DateTime.tryParse(raw);
+        if (dt == null) continue;
+        final day = DateTime(dt.year, dt.month, dt.day);
+
+        final revenue = (d['total'] as num?)?.toDouble() ?? 0;
+        final profit = (d['totalProfit'] as num?)?.toDouble() ?? 0;
+        final sign = isRefund ? -1.0 : 1.0;
+
+        // Daily
+        if (dRev.containsKey(day)) {
+          dRev[day] = (dRev[day] ?? 0) + sign * revenue;
+          dProfit[day] = (dProfit[day] ?? 0) + sign * profit;
+        }
+
+        // Monthly
+        final mk = '${dt.year}-${dt.month.toString().padLeft(2, '0')}';
+        if (mRev.containsKey(mk)) {
+          mRev[mk] = (mRev[mk] ?? 0) + sign * revenue;
+          mProfit[mk] = (mProfit[mk] ?? 0) + sign * profit;
+        }
+
+        // Today summary
+        if (day == today) {
+          todayRev += sign * revenue;
+          todayProfit += sign * profit;
+        }
+
+        // Month summary
+        if (!dt.isBefore(monthStart)) {
+          monthRev += sign * revenue;
+          monthProfit += sign * profit;
+        }
+
+        // Per-product stats: only unwind from sales (not refunds — complex to reverse per item)
+        if (!isRefund) {
+          final rawItems = d['items'];
+          if (rawItems is List) {
+            for (final item in rawItems) {
+              if (item is! Map) continue;
+              final name = (item['name'] as String?) ?? 'Unknown';
+              final itemProfit = (item['itemProfit'] as num?)?.toDouble() ?? 0;
+              final lineTotal = (item['lineTotal'] as num?)?.toDouble() ?? 0;
+              final qty = (item['qty'] as num?)?.toDouble() ?? 0;
+              prodMap.putIfAbsent(
+                  name, () => {'profit': 0, 'revenue': 0, 'qty': 0});
+              prodMap[name]!['profit'] =
+                  (prodMap[name]!['profit'] ?? 0) + itemProfit;
+              prodMap[name]!['revenue'] =
+                  (prodMap[name]!['revenue'] ?? 0) + lineTotal;
+              prodMap[name]!['qty'] = (prodMap[name]!['qty'] ?? 0) + qty;
+            }
+          }
+        }
+      }
+
+      // Sort top products by profit desc, take top 10
+      final sorted = prodMap.entries.toList()
+        ..sort((a, b) =>
+            (b.value['profit'] ?? 0).compareTo(a.value['profit'] ?? 0));
+      final top = sorted
+          .where((e) => (e.value['profit'] ?? 0) > 0)
+          .take(10)
+          .map((e) => {'name': e.key, ...e.value})
+          .toList();
+
+      if (mounted) {
+        setState(() {
+          _dailyRevenue = dRev;
+          _dailyProfit = dProfit;
+          _monthlyRevenue = mRev;
+          _monthlyProfit = mProfit;
+          _todayRevenue = todayRev;
+          _todayProfit = todayProfit;
+          _monthRevenue = monthRev;
+          _monthProfit = monthProfit;
+          _topProducts = top;
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _pickRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDateRange: DateTimeRange(start: _from, end: _to),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.light(primary: AppColors.primary),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() {
+        _from =
+            DateTime(picked.start.year, picked.start.month, picked.start.day);
+        _to = DateTime(picked.end.year, picked.end.month, picked.end.day);
+      });
+      _fetch();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final todayMargin =
+        _todayRevenue > 0 ? _todayProfit / _todayRevenue * 100 : 0.0;
+    final monthMargin =
+        _monthRevenue > 0 ? _monthProfit / _monthRevenue * 100 : 0.0;
+
     return Scaffold(
       backgroundColor: AppColors.bg,
       appBar: AppBar(
         backgroundColor: AppColors.card,
-        title: Text('Quick Stats',
+        elevation: 0,
+        iconTheme: IconThemeData(color: AppColors.textPrimary),
+        title: Text('အမြတ် ခွဲခြမ်းစိတ်ဖြာ',
             style: GoogleFonts.poppins(
                 fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        iconTheme: IconThemeData(color: AppColors.textPrimary),
-        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
-            onPressed: widget.pos.fetchSalesHistory,
+            onPressed: _fetch,
           ),
         ],
       ),
-      body: Obx(() {
-        if (widget.pos.isLoadingHistory.value) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final today = DateTime.now();
-        final todaySales = widget.pos.salesHistory
-            .where((s) =>
-                !s.isRefundRecord &&
-                s.createdAt.year == today.year &&
-                s.createdAt.month == today.month &&
-                s.createdAt.day == today.day)
-            .toList();
-        final todayRevenue =
-            todaySales.fold<double>(0, (acc, s) => acc + s.total);
-        final todayCash = todaySales
-            .where((s) => s.paymentMethod == 'cash')
-            .fold<double>(0, (acc, s) => acc + s.total);
-        final todayCard = todaySales
-            .where((s) => s.paymentMethod == 'card')
-            .fold<double>(0, (acc, s) => acc + s.total);
-        final avgOrder =
-            todaySales.isEmpty ? 0.0 : todayRevenue / todaySales.length;
-
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Text(
-              DateFormat('EEEE, dd MMMM yyyy').format(today),
-              style: GoogleFonts.poppins(
-                  fontSize: 13, color: AppColors.textMedium),
-            ),
-            const SizedBox(height: 14),
-            GridView.count(
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 1.4,
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
               children: [
-                _StatCard(
-                  label: "Today's Revenue",
-                  value: fmtPrice(todayRevenue),
-                  icon: Icons.attach_money_rounded,
-                  color: const Color(0xFF27AE60),
+                // ── Summary grid ──────────────────────────────────────────
+                _SectionHeader('Summary'),
+                const SizedBox(height: 10),
+                LayoutBuilder(builder: (ctx, bc) {
+                  final isTablet = bc.maxWidth >= 600;
+                  return GridView.count(
+                    crossAxisCount: isTablet ? 4 : 2,
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: isTablet ? 1.6 : 1.7,
+                    children: [
+                      _StatCard(
+                        label: "Today's Profit",
+                        value: fmtPrice(_todayProfit),
+                        icon: Icons.trending_up_rounded,
+                        color: const Color(0xFF27AE60),
+                      ),
+                      _StatCard(
+                        label: "Today's Margin",
+                        value: '${todayMargin.toStringAsFixed(1)}%',
+                        icon: Icons.percent_rounded,
+                        color: const Color(0xFF2980B9),
+                      ),
+                      _StatCard(
+                        label: "Month's Profit",
+                        value: fmtPrice(_monthProfit),
+                        icon: Icons.calendar_month_rounded,
+                        color: const Color(0xFF8E44AD),
+                      ),
+                      _StatCard(
+                        label: "Month's Margin",
+                        value: '${monthMargin.toStringAsFixed(1)}%',
+                        icon: Icons.donut_large_rounded,
+                        color: const Color(0xFFF39C12),
+                      ),
+                    ],
+                  );
+                }),
+
+                const SizedBox(height: 24),
+
+                // ── Daily profit chart ────────────────────────────────────
+                _SectionHeader('နေ့စဉ် အမြတ် နှင့် ဝင်ငွေ'),
+                const SizedBox(height: 10),
+                _ProfitChartCard(
+                  revenueData: _dailyRevenue,
+                  profitData: _dailyProfit,
+                  from: _from,
+                  to: _to,
+                  onPickRange: _pickRange,
+                  labelType: 'daily',
                 ),
-                _StatCard(
-                  label: 'Transactions',
-                  value: todaySales.length.toString(),
-                  icon: Icons.receipt_rounded,
-                  color: AppColors.primary,
+
+                const SizedBox(height: 24),
+
+                // ── Monthly profit chart ──────────────────────────────────
+                _SectionHeader('Monthly Profit (Last 12 Months)'),
+                const SizedBox(height: 10),
+                _MonthlyProfitChart(
+                  monthKeys: _monthKeys,
+                  revenueData: _monthlyRevenue,
+                  profitData: _monthlyProfit,
                 ),
-                _StatCard(
-                  label: 'Cash Sales',
-                  value: fmtPrice(todayCash),
-                  icon: Icons.payments_rounded,
-                  color: const Color(0xFFF39C12),
-                ),
-                _StatCard(
-                  label: 'Card Sales',
-                  value: fmtPrice(todayCard),
-                  icon: Icons.credit_card_rounded,
-                  color: const Color(0xFF2980B9),
-                ),
-                _StatCard(
-                  label: 'Avg. Order',
-                  value: fmtPrice(avgOrder),
-                  icon: Icons.trending_up_rounded,
-                  color: const Color(0xFF8E44AD),
-                ),
-                _StatCard(
-                  label: 'Total Records',
-                  value: widget.pos.salesHistory.length.toString(),
-                  icon: Icons.history_rounded,
-                  color: AppColors.textMedium,
-                ),
+
+                const SizedBox(height: 24),
+
+                // ── Top products ──────────────────────────────────────────
+                _SectionHeader('Top Products by Profit'),
+                const SizedBox(height: 10),
+                if (_topProducts.isEmpty)
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: AppColors.card,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Center(
+                      child: Text(
+                        'No profit data yet.\nAdd a cost price to products to track profit.',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.poppins(
+                            fontSize: 13, color: AppColors.textMedium),
+                      ),
+                    ),
+                  )
+                else
+                  Container(
+                    decoration: BoxDecoration(
+                      color: AppColors.card,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      children: _topProducts.asMap().entries.map((e) {
+                        final rank = e.key + 1;
+                        final p = e.value;
+                        final name = p['name'] as String;
+                        final profit = (p['profit'] as double?) ?? 0;
+                        final revenue = (p['revenue'] as double?) ?? 0;
+                        final margin =
+                            revenue > 0 ? profit / revenue * 100 : 0.0;
+                        final isLast = rank == _topProducts.length;
+                        return Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 12),
+                              child: Row(children: [
+                                Container(
+                                  width: 28,
+                                  height: 28,
+                                  decoration: BoxDecoration(
+                                    color: rank == 1
+                                        ? const Color(0xFFFFD700)
+                                        : rank == 2
+                                            ? const Color(0xFFC0C0C0)
+                                            : rank == 3
+                                                ? const Color(0xFFCD7F32)
+                                                : AppColors.bg,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Center(
+                                    child: Text('$rank',
+                                        style: GoogleFonts.poppins(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: rank <= 3
+                                                ? Colors.white
+                                                : AppColors.textMedium)),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(name,
+                                          style: GoogleFonts.poppins(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: AppColors.textPrimary),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis),
+                                      Text(
+                                        'Revenue: ${fmtPrice(revenue)}  |  Margin: ${margin.toStringAsFixed(1)}%',
+                                        style: GoogleFonts.poppins(
+                                            fontSize: 11,
+                                            color: AppColors.textMedium),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(fmtPrice(profit),
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        color: const Color(0xFF27AE60))),
+                              ]),
+                            ),
+                            if (!isLast)
+                              Divider(
+                                  height: 1,
+                                  color: AppColors.bg,
+                                  indent: 16,
+                                  endIndent: 16),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+
+                const SizedBox(height: 32),
               ],
             ),
-          ],
-        );
-      }),
     );
+  }
+}
+
+// ── Section Header helper ──────────────────────────────────────────────────────
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  const _SectionHeader(this.title);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(title,
+        style: GoogleFonts.poppins(
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+            color: AppColors.textPrimary));
+  }
+}
+
+// ── Daily Profit Chart Card ────────────────────────────────────────────────────
+class _ProfitChartCard extends StatelessWidget {
+  final Map<DateTime, double> revenueData;
+  final Map<DateTime, double> profitData;
+  final DateTime from;
+  final DateTime to;
+  final VoidCallback onPickRange;
+  final String labelType;
+
+  const _ProfitChartCard({
+    required this.revenueData,
+    required this.profitData,
+    required this.from,
+    required this.to,
+    required this.onPickRange,
+    required this.labelType,
+  });
+
+  String _fmtK(double v) {
+    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
+    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
+    return v.toStringAsFixed(0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sortedDays = revenueData.keys.toList()..sort();
+    final allVals = [
+      ...revenueData.values,
+      ...profitData.values,
+    ];
+    final maxVal = allVals.fold(0.0, (a, b) => a > b ? a : b);
+    final yMax = maxVal <= 0 ? 1000.0 : maxVal * 1.25;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('နေ့စဉ် အမြတ် နှင့် ဝင်ငွေ',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                  Text(
+                    '${DateFormat('dd MMM').format(from)} – ${DateFormat('dd MMM yyyy').format(to)}',
+                    style: GoogleFonts.poppins(
+                        fontSize: 11, color: AppColors.textMedium),
+                  ),
+                ],
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: onPickRange,
+              icon: const Icon(Icons.date_range_rounded, size: 15),
+              label: Text('ကာလ',
+                  style: GoogleFonts.poppins(
+                      fontSize: 12, fontWeight: FontWeight.w500)),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.primary,
+                side:
+                    BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          // Legend
+          Row(children: [
+            _LegendDot(color: AppColors.primary, label: 'ဝင်ငွေ'),
+            const SizedBox(width: 16),
+            _LegendDot(color: const Color(0xFF27AE60), label: 'အမြတ်'),
+          ]),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 200,
+            child: sortedDays.isEmpty
+                ? Center(
+                    child: Text('ဤကာလအတွင်း ဒေတာ မရှိပါ',
+                        style: GoogleFonts.poppins(
+                            fontSize: 13, color: AppColors.textMedium)))
+                : BarChart(
+                    BarChartData(
+                      maxY: yMax,
+                      minY: 0,
+                      barGroups: sortedDays.asMap().entries.map((e) {
+                        final day = e.value;
+                        final rev = revenueData[day] ?? 0;
+                        final prf = profitData[day] ?? 0;
+                        final barW = (260 / sortedDays.length).clamp(4.0, 16.0);
+                        return BarChartGroupData(
+                          x: e.key,
+                          groupVertically: false,
+                          barsSpace: 2,
+                          barRods: [
+                            BarChartRodData(
+                              toY: rev,
+                              width: barW,
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(4)),
+                              color: AppColors.primary.withValues(alpha: 0.7),
+                            ),
+                            BarChartRodData(
+                              toY: prf,
+                              width: barW,
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(4)),
+                              color: const Color(0xFF27AE60),
+                            ),
+                          ],
+                        );
+                      }).toList(),
+                      titlesData: FlTitlesData(
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 42,
+                            getTitlesWidget: (v, _) => Text(
+                              _fmtK(v),
+                              style: GoogleFonts.poppins(
+                                  fontSize: 9, color: AppColors.textMedium),
+                            ),
+                          ),
+                        ),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 28,
+                            getTitlesWidget: (v, _) {
+                              final idx = v.toInt();
+                              if (idx < 0 || idx >= sortedDays.length) {
+                                return const SizedBox.shrink();
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  DateFormat('d/M').format(sortedDays[idx]),
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 8, color: AppColors.textMedium),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false)),
+                        rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false)),
+                      ),
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        getDrawingHorizontalLine: (v) => FlLine(
+                          color: AppColors.textMedium.withValues(alpha: 0.1),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      borderData: FlBorderData(show: false),
+                      barTouchData: BarTouchData(
+                        touchTooltipData: BarTouchTooltipData(
+                          getTooltipItem: (group, gi, rod, ri) {
+                            final day = sortedDays[group.x.toInt()];
+                            final label = ri == 0 ? 'ဝင်ငွေ' : 'အမြတ်';
+                            return BarTooltipItem(
+                              '${DateFormat('dd MMM').format(day)}\n$label: ${fmtPrice(rod.toY)}',
+                              GoogleFonts.poppins(
+                                  fontSize: 11, color: Colors.white),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Monthly Profit Chart ───────────────────────────────────────────────────────
+class _MonthlyProfitChart extends StatelessWidget {
+  final List<String> monthKeys;
+  final Map<String, double> revenueData;
+  final Map<String, double> profitData;
+
+  const _MonthlyProfitChart({
+    required this.monthKeys,
+    required this.revenueData,
+    required this.profitData,
+  });
+
+  String _fmtK(double v) {
+    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
+    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
+    return v.toStringAsFixed(0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allVals = [
+      ...revenueData.values,
+      ...profitData.values,
+    ];
+    final maxVal = allVals.fold(0.0, (a, b) => a > b ? a : b);
+    final yMax = maxVal <= 0 ? 1000.0 : maxVal * 1.25;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            _LegendDot(color: AppColors.primary, label: 'ဝင်ငွေ'),
+            const SizedBox(width: 16),
+            _LegendDot(color: const Color(0xFF27AE60), label: 'အမြတ်'),
+          ]),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 200,
+            child: BarChart(
+              BarChartData(
+                maxY: yMax,
+                minY: 0,
+                barGroups: monthKeys.asMap().entries.map((e) {
+                  final mk = e.value;
+                  final rev = revenueData[mk] ?? 0;
+                  final prf = profitData[mk] ?? 0;
+                  final barW = (260 / monthKeys.length).clamp(4.0, 16.0);
+                  return BarChartGroupData(
+                    x: e.key,
+                    groupVertically: false,
+                    barsSpace: 2,
+                    barRods: [
+                      BarChartRodData(
+                        toY: rev,
+                        width: barW,
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(4)),
+                        color: AppColors.primary.withValues(alpha: 0.7),
+                      ),
+                      BarChartRodData(
+                        toY: prf,
+                        width: barW,
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(4)),
+                        color: const Color(0xFF27AE60),
+                      ),
+                    ],
+                  );
+                }).toList(),
+                titlesData: FlTitlesData(
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 42,
+                      getTitlesWidget: (v, _) => Text(
+                        _fmtK(v),
+                        style: GoogleFonts.poppins(
+                            fontSize: 9, color: AppColors.textMedium),
+                      ),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 28,
+                      getTitlesWidget: (v, _) {
+                        final idx = v.toInt();
+                        if (idx < 0 || idx >= monthKeys.length) {
+                          return const SizedBox.shrink();
+                        }
+                        final parts = monthKeys[idx].split('-');
+                        final month = int.tryParse(parts[1]) ?? 1;
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            DateFormat('MMM').format(DateTime(2000, month)),
+                            style: GoogleFonts.poppins(
+                                fontSize: 8, color: AppColors.textMedium),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                ),
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (v) => FlLine(
+                    color: AppColors.textMedium.withValues(alpha: 0.1),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(show: false),
+                barTouchData: BarTouchData(
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipItem: (group, gi, rod, ri) {
+                      final mk = monthKeys[group.x.toInt()];
+                      final parts = mk.split('-');
+                      final label = ri == 0 ? 'ဝင်ငွေ' : 'အမြတ်';
+                      final month = int.tryParse(parts[1]) ?? 1;
+                      final yr = parts[0];
+                      return BarTooltipItem(
+                        '${DateFormat('MMM').format(DateTime(2000, month))} $yr\n$label: ${fmtPrice(rod.toY)}',
+                        GoogleFonts.poppins(fontSize: 11, color: Colors.white),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Legend dot ─────────────────────────────────────────────────────────────────
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+      const SizedBox(width: 4),
+      Text(label,
+          style:
+              GoogleFonts.poppins(fontSize: 11, color: AppColors.textMedium)),
+    ]);
   }
 }
 
@@ -4477,6 +5954,528 @@ class _StatCard extends StatelessWidget {
               style: GoogleFonts.poppins(
                   fontSize: 10, color: AppColors.textMedium)),
         ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Staff Management Page
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _StaffManagementPage extends StatefulWidget {
+  const _StaffManagementPage();
+
+  @override
+  State<_StaffManagementPage> createState() => _StaffManagementPageState();
+}
+
+class _StaffManagementPageState extends State<_StaffManagementPage> {
+  final _db = FirebaseFirestore.instance;
+  final _nameCtrl = TextEditingController();
+  List<Map<String, dynamic>> _staff = [];
+  bool _loading = true;
+  bool _saving = false;
+
+  // ── Chart ──────────────────────────────────────────────────────────────────
+  String _chartFilter = 'day'; // 'day' | 'month'
+  Map<String, double> _chartData = {};
+  bool _chartLoading = false;
+
+  static const _barColors = [
+    Color(0xFF6A1B9A), Color(0xFF1976D2), Color(0xFF00897B),
+    Color(0xFFFF8C00), Color(0xFFC62828), Color(0xFF2E7D32),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _fetchChart();
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchChart() async {
+    setState(() => _chartLoading = true);
+    try {
+      final now = DateTime.now();
+      DateTime from;
+      if (_chartFilter == 'day') {
+        from = DateTime(now.year, now.month, now.day);
+      } else {
+        from = DateTime(now.year, now.month, 1);
+      }
+      final snap = await _db.collection('pos_sales').get();
+      final Map<String, double> map = {};
+      for (final doc in snap.docs) {
+        final d = doc.data();
+        if ((d['type'] as String? ?? 'sale') == 'refund') continue;
+        final staffName = (d['staffName'] as String? ?? '').trim();
+        if (staffName.isEmpty) continue;
+        final raw = d['createdAt'];
+        DateTime? dt;
+        if (raw is String) dt = DateTime.tryParse(raw);
+        if (dt == null || dt.isBefore(from)) continue;
+        final amount = (d['total'] as num?)?.toDouble() ?? 0;
+        map[staffName] = (map[staffName] ?? 0) + amount;
+      }
+      if (mounted) setState(() { _chartData = map; _chartLoading = false; });
+    } catch (_) {
+      if (mounted) setState(() => _chartLoading = false);
+    }
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final snap =
+          await _db.collection('pos_staff').orderBy('name').get();
+      if (mounted) {
+        setState(() {
+          _staff = snap.docs
+              .map((d) => {'id': d.id, ...d.data()})
+              .toList();
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    setState(() => _saving = true);
+    try {
+      await _db.collection('pos_staff').add({
+        'name': name,
+        'createdAt': DateTime.now().toIso8601String(),
+      });
+      _nameCtrl.clear();
+      await _load();
+    } catch (e) {
+      _snack('မထည့်နိုင်ပါ: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _delete(String id, String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: Text('ဖျက်ရန် အတည်ပြုပါ',
+            style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+        content: Text('"$name" ဖျက်မည်လား?',
+            style: GoogleFonts.poppins(color: AppColors.textMedium)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text('မလုပ်တော့',
+                  style: GoogleFonts.poppins(color: AppColors.textMedium))),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text('ဖျက်မည်',
+                  style: GoogleFonts.poppins(color: AppColors.secondary))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _db.collection('pos_staff').doc(id).delete();
+      await _load();
+    } catch (e) {
+      _snack('မဖျက်နိုင်ပါ: $e');
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: GoogleFonts.poppins(fontSize: 12)),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      appBar: AppBar(
+        backgroundColor: AppColors.card,
+        elevation: 0,
+        title: Text('ဝန်ထမ်းများ',
+            style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+        iconTheme: IconThemeData(color: AppColors.textPrimary),
+        actions: [
+          IconButton(
+              icon: const Icon(Icons.refresh_rounded),
+              onPressed: () { _load(); _fetchChart(); }),
+        ],
+      ),
+      body: LayoutBuilder(builder: (_, constraints) {
+        final isWide = constraints.maxWidth >= 720;
+        if (isWide) {
+          return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+              child: Column(children: [
+                _buildAddStaffBar(),
+                _buildStaffList(),
+              ]),
+            ),
+            VerticalDivider(
+                width: 1, thickness: 1, color: AppColors.border),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: _buildSalesChart(),
+              ),
+            ),
+          ]);
+        }
+        return Column(children: [
+          _buildAddStaffBar(),
+          _buildSalesChart(),
+          _buildStaffList(),
+        ]);
+      }),
+    );
+  }
+
+  Widget _buildAddStaffBar() {
+    return Container(
+      color: AppColors.card,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Row(children: [
+        Expanded(
+          child: TextField(
+            controller: _nameCtrl,
+            style: GoogleFonts.poppins(
+                fontSize: 14, color: AppColors.textPrimary),
+            decoration: InputDecoration(
+              hintText: 'ဝန်ထမ်းအမည် ထည့်ပါ...',
+              hintStyle: GoogleFonts.poppins(
+                  fontSize: 13, color: AppColors.textMedium),
+              filled: true,
+              fillColor: AppColors.bg,
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            onSubmitted: (_) => _add(),
+          ),
+        ),
+        const SizedBox(width: 10),
+        ElevatedButton.icon(
+          onPressed: _saving ? null : _add,
+          icon: _saving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.add_rounded, size: 18),
+          label: Text('ထည့်မည်',
+              style: GoogleFonts.poppins(
+                  fontSize: 13, fontWeight: FontWeight.w600)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(
+                horizontal: 16, vertical: 14),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildStaffList() {
+    return Expanded(
+      child: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _staff.isEmpty
+              ? Center(
+                  child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.people_outline_rounded,
+                            size: 52, color: AppColors.textLight),
+                        const SizedBox(height: 10),
+                        Text('ဝန်ထမ်း မရှိသေးပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 14,
+                                color: AppColors.textMedium)),
+                      ]))
+              : ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _staff.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (_, i) {
+                    final s = _staff[i];
+                    final name = s['name'] as String? ?? '';
+                    final amount = _chartData[name] ?? 0.0;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: AppColors.card,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(children: [
+                        Container(
+                          width: 38,
+                          height: 38,
+                          decoration: BoxDecoration(
+                            color: _barColors[i % _barColors.length]
+                                .withValues(alpha: 0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              name.isNotEmpty ? name[0].toUpperCase() : '?',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  color: _barColors[i % _barColors.length]),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(name,
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary)),
+                              if (amount > 0)
+                                Text(
+                                  '${_chartFilter == 'day' ? 'ယနေ့' : 'ဤလ'}: ${fmtPrice(amount)}',
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 11,
+                                      color: _barColors[
+                                          i % _barColors.length]),
+                                ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.delete_outline_rounded,
+                              color: AppColors.secondary, size: 20),
+                          onPressed: () => _delete(s['id'] as String, name),
+                        ),
+                      ]),
+                    );
+                  },
+                ),
+    );
+  }
+
+  Widget _buildSalesChart() {
+    final entries = _chartData.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final maxVal = entries.isEmpty
+        ? 1000.0
+        : entries.first.value * 1.25;
+
+    return Container(
+      color: AppColors.card,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Header + toggle
+        Row(children: [
+          Expanded(
+            child: Text(
+              _chartFilter == 'day' ? 'ယနေ့ ရောင်းချမှု' : 'ဤလ ရောင်းချမှု',
+              style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary),
+            ),
+          ),
+          _FilterChip(
+            label: 'ယနေ့',
+            selected: _chartFilter == 'day',
+            onTap: () {
+              setState(() => _chartFilter = 'day');
+              _fetchChart();
+            },
+          ),
+          const SizedBox(width: 6),
+          _FilterChip(
+            label: 'ဤလ',
+            selected: _chartFilter == 'month',
+            onTap: () {
+              setState(() => _chartFilter = 'month');
+              _fetchChart();
+            },
+          ),
+        ]),
+        const SizedBox(height: 12),
+        // Chart
+        SizedBox(
+          height: 180,
+          child: _chartLoading
+              ? const Center(child: CircularProgressIndicator())
+              : entries.isEmpty
+                  ? Center(
+                      child: Text('ဤကာလ ရောင်းချမှု မရှိပါ',
+                          style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: AppColors.textMedium)))
+                  : BarChart(
+                      BarChartData(
+                        maxY: maxVal,
+                        minY: 0,
+                        barGroups: entries.asMap().entries.map((e) {
+                          final idx = e.key;
+                          final color =
+                              _barColors[idx % _barColors.length];
+                          return BarChartGroupData(
+                            x: idx,
+                            barRods: [
+                              BarChartRodData(
+                                toY: e.value.value,
+                                width: (220 / entries.length)
+                                    .clamp(12.0, 40.0),
+                                borderRadius:
+                                    const BorderRadius.vertical(
+                                        top: Radius.circular(6)),
+                                color: color,
+                              ),
+                            ],
+                          );
+                        }).toList(),
+                        titlesData: FlTitlesData(
+                          topTitles: const AxisTitles(
+                              sideTitles:
+                                  SideTitles(showTitles: false)),
+                          rightTitles: const AxisTitles(
+                              sideTitles:
+                                  SideTitles(showTitles: false)),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 44,
+                              interval: maxVal / 4,
+                              getTitlesWidget: (v, _) {
+                                if (v == 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                final k = v >= 1000000
+                                    ? '${(v / 1000000).toStringAsFixed(1)}M'
+                                    : v >= 1000
+                                        ? '${(v / 1000).toStringAsFixed(0)}K'
+                                        : v.toStringAsFixed(0);
+                                return Text(k,
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 9,
+                                        color: AppColors.textMedium));
+                              },
+                            ),
+                          ),
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 28,
+                              getTitlesWidget: (v, _) {
+                                final i = v.toInt();
+                                if (i >= entries.length) {
+                                  return const SizedBox.shrink();
+                                }
+                                final name = entries[i].key;
+                                final short = name.length > 6
+                                    ? name.substring(0, 6)
+                                    : name;
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 4),
+                                  child: Text(short,
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 9,
+                                          color: AppColors.textMedium)),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                        gridData: FlGridData(
+                          drawVerticalLine: false,
+                          horizontalInterval: maxVal / 4,
+                          getDrawingHorizontalLine: (_) => FlLine(
+                            color:
+                                AppColors.border.withValues(alpha: 0.4),
+                            strokeWidth: 0.5,
+                          ),
+                        ),
+                        borderData: FlBorderData(show: false),
+                        barTouchData: BarTouchData(
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipColor: (_) => AppColors.textPrimary,
+                            tooltipRoundedRadius: 8,
+                            getTooltipItem: (group, _, rod, __) {
+                              final name = entries[group.x].key;
+                              return BarTooltipItem(
+                                '$name\n${fmtPrice(rod.toY)}',
+                                GoogleFonts.poppins(
+                                    fontSize: 10,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _FilterChip(
+      {required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.primary
+              : AppColors.primary.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.poppins(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: selected ? Colors.white : AppColors.primary,
+          ),
+        ),
       ),
     );
   }

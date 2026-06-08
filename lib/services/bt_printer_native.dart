@@ -61,6 +61,9 @@ class BtNative {
     if (settings.showId)      await _bt.printCustom('Receipt: ${sale.id}', 1, 0);
     if (settings.showDate)    await _bt.printCustom('Date   : ${fmt.format(sale.createdAt)}', 1, 0);
     if (settings.showCashier) await _bt.printCustom('Cashier: ${sale.cashierName}', 1, 0);
+    if (settings.showCashier && sale.staffName.isNotEmpty) {
+      await _bt.printCustom('Staff  : ${sale.staffName}', 1, 0);
+    }
     await _bt.printCustom('-' * charsPerLine, 1, 0);
 
     // Items
@@ -89,11 +92,19 @@ class BtNative {
       await _bt.printLeftRight('Cash', fmtPrice(sale.cashGiven), 1);
       await _bt.printLeftRight('Change', fmtPrice(sale.change), 1);
     } else {
-      await _bt.printLeftRight('Payment', 'Card', 1);
+      final label = sale.paymentMethod == 'kpay'
+          ? 'KPay'
+          : sale.paymentMethod == 'wavepay'
+              ? 'WavePay'
+              : 'Card';
+      await _bt.printLeftRight('Payment', label, 1);
     }
 
     await _bt.printCustom('-' * charsPerLine, 1, 0);
     if (settings.footer.isNotEmpty) await _bt.printCustom(settings.footer, 1, 1);
+    await _bt.printNewLine();
+    await _bt.printNewLine();
+    await _bt.printNewLine();
     await _bt.printNewLine();
     await _bt.printNewLine();
     await _bt.printNewLine();

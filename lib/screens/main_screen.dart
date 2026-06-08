@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:get/get.dart';
 import '../core/theme.dart';
@@ -51,6 +52,38 @@ class _MainScreenState extends State<MainScreen>
     super.dispose();
   }
 
+  Future<void> _showQuitDialog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Quit App?',
+            style: GoogleFonts.poppins(fontWeight: FontWeight.w700)),
+        content: Text('Are you sure you want to quit?',
+            style: GoogleFonts.poppins(fontSize: 14)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel', style: GoogleFonts.poppins()),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Quit',
+                style: GoogleFonts.poppins(
+                    color: Colors.white, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) SystemNavigator.pop();
+  }
+
   void _onTabTapped(int index) {
     if (index == _currentIndex) return;
     final isLoggedIn = Get.find<AuthController>().isLoggedIn;
@@ -75,7 +108,9 @@ class _MainScreenState extends State<MainScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (_) => Padding(
+      builder: (ctx) => Responsive.constrainSheet(
+        ctx,
+        Padding(
         padding: const EdgeInsets.fromLTRB(24, 16, 24, 36),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -186,23 +221,30 @@ class _MainScreenState extends State<MainScreen>
             ),
           ],
         ),
+        ),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Responsive.isDesktop(context)
-        ? _WideLayout(
-            currentIndex: _currentIndex,
-            screens: _screens,
-            onTap: _onTabTapped,
-          )
-        : _MobileLayout(
-            currentIndex: _currentIndex,
-            screens: _screens,
-            onTap: _onTabTapped,
-          );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _showQuitDialog();
+      },
+      child: Responsive.isDesktop(context)
+          ? _WideLayout(
+              currentIndex: _currentIndex,
+              screens: _screens,
+              onTap: _onTabTapped,
+            )
+          : _MobileLayout(
+              currentIndex: _currentIndex,
+              screens: _screens,
+              onTap: _onTabTapped,
+            ),
+    );
   }
 }
 

@@ -23,6 +23,7 @@ class BarcodeScannerService extends GetxController {
 
   ServerSocket?    _server;
   final _sockets = <Socket>[];
+  Timer?           _ipTimer;
 
   @override
   void onInit() {
@@ -31,14 +32,31 @@ class BarcodeScannerService extends GetxController {
       _loadPort().then((_) async {
         await _resolveIp();
         await start();
+        _startIpRefresh();
       });
     }
   }
 
   @override
   void onClose() {
+    _ipTimer?.cancel();
     _stopInternal();
     super.onClose();
+  }
+
+  // Periodically re-resolve the WiFi IP. If the device switches networks the
+  // displayed address updates automatically and the server restarts so the new
+  // IP is the one shown to the scanner app.
+  void _startIpRefresh() {
+    _ipTimer?.cancel();
+    _ipTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      final prev = ipAddress.value;
+      await _resolveIp();
+      if (ipAddress.value != prev && ipAddress.value.isNotEmpty) {
+        // WiFi network changed — restart so socket is clean on the new interface
+        await restart();
+      }
+    });
   }
 
   Future<void> _loadPort() async {

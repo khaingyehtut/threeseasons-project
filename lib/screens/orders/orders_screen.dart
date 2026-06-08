@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:get/get.dart';
 import 'package:intl/intl.dart';
 import '../../core/constants.dart';
+import '../../core/responsive.dart';
 import '../../core/theme.dart';
 import '../../core/navigation.dart';
 import '../../controllers/auth_controller.dart';
@@ -174,12 +175,28 @@ class _OrdersScreenState extends State<OrdersScreen> with SingleTickerProviderSt
       onRefresh: () async => Get.find<OrderController>().listenToUserOrders(
         Get.find<AuthController>().user.value?.id ?? '',
       ),
-      child: ListView.separated(
-        padding: const EdgeInsets.all(16),
-        itemCount: orders.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
-        itemBuilder: (context, index) => _buildOrderCard(orders[index]),
-      ),
+      child: LayoutBuilder(builder: (ctx, bc) {
+        final isWide = bc.maxWidth >= 700;
+        if (isWide) {
+          return GridView.builder(
+            padding: const EdgeInsets.all(16),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 2.4,
+            ),
+            itemCount: orders.length,
+            itemBuilder: (context, index) => _buildOrderCard(orders[index]),
+          );
+        }
+        return ListView.separated(
+          padding: const EdgeInsets.all(16),
+          itemCount: orders.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 12),
+          itemBuilder: (context, index) => _buildOrderCard(orders[index]),
+        );
+      }),
     );
   }
 

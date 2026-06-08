@@ -23,7 +23,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_in_app_messaging/firebase_in_app_messaging.dart';
 import 'services/notification_service.dart';
 import 'services/bt_printer_service.dart';
-import 'services/offline_service.dart';
+import 'features/pos/data/repositories/pos_repository.dart';
 import 'services/barcode_server_service.dart';
 
 // Repository implementations
@@ -119,7 +119,7 @@ class ThreeSeasonsApp extends StatelessWidget {
           Get.put(NotificationController(), permanent: true);
           Get.put(AnnouncementController(), permanent: true);
           Get.put(BtPrinterService(), permanent: true);
-          Get.put(OfflineService(), permanent: true);
+          Get.put(PosRepository(), permanent: true);
           Get.put(BarcodeScannerService(), permanent: true);
         }),
       ),

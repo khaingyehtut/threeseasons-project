@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:get/get.dart';
 import 'package:animate_do/animate_do.dart';
+import '../../core/responsive.dart';
 import '../../core/theme.dart';
 import '../../core/navigation.dart';
 import '../../controllers/auth_controller.dart';
@@ -48,11 +49,19 @@ class ProfileScreen extends StatelessWidget {
                 ),
               ),
 
-              // Menu items
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
-                sliver: SliverList(
-                  delegate: SliverChildListDelegate([
+              // Menu items — centred & width-capped on tablet landscape
+              SliverToBoxAdapter(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: Responsive.isWide(context) ? 700 : double.infinity,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
                     FadeInUp(
                       duration: const Duration(milliseconds: 500),
                       delay: const Duration(milliseconds: 200),
@@ -126,7 +135,10 @@ class ProfileScreen extends StatelessWidget {
                       child: _LogoutButton(auth: auth),
                     ),
                     const SizedBox(height: 40),
-                  ]),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
