@@ -11,6 +11,7 @@ class ProductCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback? onAddToCart;
   final bool isInCart;
+  final double imageHeight;
 
   const ProductCard({
     super.key,
@@ -18,6 +19,7 @@ class ProductCard extends StatelessWidget {
     required this.onTap,
     this.onAddToCart,
     this.isInCart = false,
+    this.imageHeight = 148,
   });
 
   @override
@@ -50,21 +52,21 @@ class ProductCard extends StatelessWidget {
                   child: product.firstImage.isNotEmpty
                       ? CachedNetworkImage(
                           imageUrl: product.firstImage,
-                          height: 140,
+                          height: imageHeight,
                           width: double.infinity,
                           fit: BoxFit.cover,
                           placeholder: (context, url) => _ShimmerBox(
-                            height: 140,
+                            height: imageHeight,
                             width: double.infinity,
                             borderRadius: const BorderRadius.vertical(
                               top: Radius.circular(16),
                             ),
                           ),
                           errorWidget: (context, url, error) => _ImageFallback(
-                            height: 140,
+                            height: imageHeight,
                           ),
                         )
-                      : _ImageFallback(height: 140),
+                      : _ImageFallback(height: imageHeight),
                 ),
                 if (product.hasDiscount)
                   Positioned(
@@ -114,7 +116,7 @@ class ProductCard extends StatelessWidget {
             // ── Details ────────────────────────────────────────
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                padding: const EdgeInsets.fromLTRB(9, 7, 9, 8),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -126,50 +128,50 @@ class ProductCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.poppins(
-                        fontSize: 10,
+                        fontSize: 9,
                         fontWeight: FontWeight.w500,
                         color: AppColors.textMedium,
                       ),
                     ),
-                    const SizedBox(height: 3),
+                    const SizedBox(height: 2),
                     // Product name
                     Text(
                       product.name,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.poppins(
-                        fontSize: 13,
+                        fontSize: 12,
                         fontWeight: FontWeight.w600,
                         color: AppColors.textPrimary,
-                        height: 1.3,
+                        height: 1.2,
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 3),
                     // Rating row
                     Row(
                       children: [
                         Icon(Icons.star_rounded,
-                            size: 13, color: AppColors.warning),
-                        const SizedBox(width: 3),
+                            size: 11, color: AppColors.warning),
+                        const SizedBox(width: 2),
                         Text(
                           product.rating.toStringAsFixed(1),
                           style: GoogleFonts.poppins(
-                            fontSize: 11,
+                            fontSize: 10,
                             fontWeight: FontWeight.w600,
                             color: AppColors.warning,
                           ),
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: 3),
                         Text(
                           '(${product.numReviews})',
                           style: GoogleFonts.poppins(
-                            fontSize: 10,
+                            fontSize: 9,
                             color: AppColors.textMedium,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    const Spacer(),
                     // Price row + cart button
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
@@ -177,11 +179,12 @@ class ProductCard extends StatelessWidget {
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
                             children: [
                               Text(
                                 fmtPrice(product.discountedPrice),
                                 style: GoogleFonts.poppins(
-                                  fontSize: 13,
+                                  fontSize: 12,
                                   fontWeight: FontWeight.w700,
                                   color: AppColors.primary,
                                 ),
@@ -190,7 +193,7 @@ class ProductCard extends StatelessWidget {
                                 Text(
                                   fmtPrice(product.price),
                                   style: GoogleFonts.poppins(
-                                    fontSize: 10,
+                                    fontSize: 9,
                                     color: AppColors.textMedium,
                                     decoration: TextDecoration.lineThrough,
                                     decorationColor: AppColors.textMedium,
@@ -204,21 +207,21 @@ class ProductCard extends StatelessWidget {
                           onTap: product.isInStock ? onAddToCart : null,
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
-                            width: 32,
-                            height: 32,
+                            width: 28,
+                            height: 28,
                             decoration: BoxDecoration(
                               color: isInCart
                                   ? AppColors.accent
                                   : (product.isInStock
                                       ? AppColors.primary
                                       : AppColors.surface),
-                              borderRadius: BorderRadius.circular(10),
+                              borderRadius: BorderRadius.circular(8),
                             ),
                             child: Icon(
                               isInCart
                                   ? Icons.check_rounded
                                   : Icons.add_shopping_cart_rounded,
-                              size: 16,
+                              size: 14,
                               color: product.isInStock
                                   ? Colors.white
                                   : AppColors.textMedium,
@@ -312,37 +315,36 @@ class ProductCardShimmer extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Image placeholder
             Container(
-              height: 140,
+              height: 148,
               decoration: BoxDecoration(
                 color: AppColors.surface,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+              padding: const EdgeInsets.fromLTRB(9, 7, 9, 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _ShimmerLine(width: 60, height: 10),
-                  const SizedBox(height: 4),
-                  _ShimmerLine(width: double.infinity, height: 12),
-                  const SizedBox(height: 4),
-                  _ShimmerLine(width: 100, height: 12),
-                  const SizedBox(height: 6),
-                  _ShimmerLine(width: 80, height: 10),
-                  const SizedBox(height: 6),
+                  _ShimmerLine(width: 55, height: 9),
+                  const SizedBox(height: 3),
+                  _ShimmerLine(width: double.infinity, height: 11),
+                  const SizedBox(height: 3),
+                  _ShimmerLine(width: 90, height: 11),
+                  const SizedBox(height: 5),
+                  _ShimmerLine(width: 70, height: 9),
+                  const SizedBox(height: 7),
                   Row(
                     children: [
-                      _ShimmerLine(width: 55, height: 14),
+                      _ShimmerLine(width: 50, height: 12),
                       const Spacer(),
                       Container(
-                        width: 32,
-                        height: 32,
+                        width: 28,
+                        height: 28,
                         decoration: BoxDecoration(
                           color: AppColors.surface,
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                       ),
                     ],

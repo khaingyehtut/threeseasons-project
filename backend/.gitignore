@@ -3,3 +3,7 @@ node_modules/
 serviceAccountKey.json
 src/uploads/*
 !src/uploads/.gitkeep
+productImages/*
+!productImages/.gitkeep
+paymentScreenshots/*
+!paymentScreenshots/.gitkeep

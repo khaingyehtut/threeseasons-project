@@ -36,6 +36,7 @@ class HomeScreen extends StatefulWidget {
 
 class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   Timer? _searchDebounce;
 
   bool _notifPermissionDenied = false;
@@ -45,11 +46,22 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadData();
       _checkNotificationPermission();
       _checkAnnouncements();
     });
+  }
+
+  void _onScroll() {
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 300) {
+      final pp = Get.find<ProductController>();
+      if (!pp.isLoading.value && pp.hasMore.value) {
+        pp.fetchProducts();
+      }
+    }
   }
 
   @override
@@ -166,6 +178,8 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     _searchDebounce?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
@@ -199,6 +213,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         color: AppColors.primary,
         backgroundColor: AppColors.card,
         child: CustomScrollView(
+          controller: _scrollController,
           physics: const BouncingScrollPhysics(),
           slivers: [
             // ── 1. SliverAppBar ──────────────────────────────────────────────
@@ -224,7 +239,10 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             // ── 4. Featured Products ─────────────────────────────────────────
             SliverToBoxAdapter(child: _buildFeaturedSection()),
 
-            // ── 5. All Products grid + sort ──────────────────────────────────
+            // ── 5. Gender filter ─────────────────────────────────────────────
+            SliverToBoxAdapter(child: _buildGenderFilter()),
+
+            // ── 6. All Products grid + sort ──────────────────────────────────
             SliverToBoxAdapter(child: _buildAllProductsHeader()),
             _buildProductsGrid(),
 
@@ -287,10 +305,8 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildSliverAppBar(String greeting, String firstName) {
     final screenHeight = MediaQuery.of(context).size.height;
-    final expandedHeight = screenHeight >= 800 ? 140.0 : 120.0;
+    final expandedHeight = screenHeight >= 800 ? 110.0 : 96.0;
     return SliverAppBar(
-      // toolbarHeight == expandedHeight means the bar never collapses —
-      // the full greeting + search bar stays pinned at the top on scroll.
       expandedHeight: expandedHeight,
       toolbarHeight: expandedHeight,
       floating: false,
@@ -303,7 +319,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         collapseMode: CollapseMode.none,
         background: Container(
           color: AppColors.bg,
-          padding: const EdgeInsets.fromLTRB(20, 20, 10, 10),
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -318,7 +334,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         Text(
                           '$greeting,',
                           style: GoogleFonts.poppins(
-                            fontSize: 13,
+                            fontSize: 11,
                             color: AppColors.textMedium,
                             fontWeight: FontWeight.w400,
                           ),
@@ -326,7 +342,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         Text(
                           firstName,
                           style: GoogleFonts.poppins(
-                            fontSize: 20,
+                            fontSize: 16,
                             fontWeight: FontWeight.w700,
                             color: AppColors.textPrimary,
                           ),
@@ -358,9 +374,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       )),
                 ],
               ),
-              const SizedBox(height: 10),
-              // Search bar is now inside the flexible space — no separate
-              // bottom widget, so it cannot stack over the greeting on web.
+              const SizedBox(height: 7),
               _SearchBar(
                 controller: _searchController,
                 onChanged: _onSearchChanged,
@@ -385,7 +399,7 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final pp = Get.find<ProductController>();
         if (pp.searchQuery.value.isNotEmpty) return const SizedBox.shrink();
         return Padding(
-          padding: const EdgeInsets.fromLTRB(0, 24, 0, 0),
+          padding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -393,9 +407,9 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 title: 'categories'.tr,
                 onSeeAll: () => _showAllCategoriesSheet(),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               SizedBox(
-                height: 44,
+                height: 36,
                 child: pp.isCategoriesLoading.value
                     ? _buildCategoryShimmer()
                     : pp.categories.isEmpty
@@ -457,9 +471,9 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         padding: const EdgeInsets.symmetric(horizontal: 20),
         itemCount: 5,
         itemBuilder: (_, __) => Container(
-          width: 90,
-          height: 40,
-          margin: const EdgeInsets.only(right: 10),
+          width: 80,
+          height: 34,
+          margin: const EdgeInsets.only(right: 8),
           decoration: BoxDecoration(
             color: AppColors.card,
             borderRadius: BorderRadius.circular(50),
@@ -494,20 +508,20 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (pp.searchQuery.value.isNotEmpty) return const SizedBox.shrink();
       final cart = Get.find<CartController>();
       return Padding(
-        padding: const EdgeInsets.fromLTRB(0, 28, 0, 0),
+        padding: const EdgeInsets.fromLTRB(0, 14, 0, 0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  Icon(Icons.star_rounded, color: AppColors.warning, size: 20),
-                  const SizedBox(width: 6),
+                  Icon(Icons.star_rounded, color: AppColors.warning, size: 16),
+                  const SizedBox(width: 5),
                   Text(
                     'featured'.tr,
                     style: GoogleFonts.poppins(
-                      fontSize: 15,
+                      fontSize: 14,
                       fontWeight: FontWeight.w700,
                       color: AppColors.textPrimary,
                     ),
@@ -515,29 +529,30 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ],
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
             SizedBox(
-              height: Responsive.cardExtent(context),
+              height: 250,
               child: pp.isLoading.value && pp.featuredProducts.isEmpty
                   ? _buildFeaturedShimmer()
                   : pp.featuredProducts.isEmpty
                       ? _buildEmptyState('no_featured'.tr)
                       : ListView.builder(
                           scrollDirection: Axis.horizontal,
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
                           physics: const BouncingScrollPhysics(),
                           itemCount: pp.featuredProducts.length,
                           itemBuilder: (context, i) {
                             final product = pp.featuredProducts[i];
                             return Padding(
-                              padding: const EdgeInsets.only(right: 14),
+                              padding: const EdgeInsets.only(right: 12),
                               child: SizedBox(
-                                width: Responsive.isTabletLandscape(context) ? 140 : 160,
+                                width: Responsive.isTabletLandscape(context) ? 120 : 138,
                                 child: ProductCard(
                                   product: product,
                                   isInCart: cart.isInCart(product.id),
                                   onTap: () => pushTo('/product/${product.id}'),
                                   onAddToCart: () => _addToCart(product),
+                                  imageHeight: 120,
                                 ),
                               ),
                             );
@@ -562,19 +577,81 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  // ── Gender filter ──────────────────────────────────────────────────────────
+
+  static const _genderOptions = [
+    {'key': '', 'label': 'All'},
+    {'key': 'male', 'label': 'Male'},
+    {'key': 'female', 'label': 'Female'},
+    {'key': 'baby', 'label': 'Baby'},
+  ];
+
+  Widget _buildGenderFilter() {
+    return Obx(() {
+      final pp = Get.find<ProductController>();
+      if (pp.searchQuery.value.isNotEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          child: Row(
+            children: _genderOptions.map((g) {
+              final key = g['key']!;
+              final isSelected = pp.selectedGender.value == key;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () => pp.setGender(key),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: isSelected ? AppColors.primary : AppColors.card,
+                      borderRadius: BorderRadius.circular(50),
+                      border: Border.all(
+                        color: isSelected
+                            ? AppColors.primary
+                            : AppColors.border,
+                        width: isSelected ? 1.5 : 1,
+                      ),
+                    ),
+                    child: Text(
+                      g['label']!,
+                      style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: isSelected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: isSelected
+                            ? Colors.white
+                            : AppColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      );
+    });
+  }
+
   // ── All Products grid header ───────────────────────────────────────────────
 
   Widget _buildAllProductsHeader() {
     return Obx(() {
       final pp = Get.find<ProductController>();
       return Padding(
-        padding: const EdgeInsets.fromLTRB(20, 28, 20, 14),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
         child: Row(
           children: [
             Text(
               'all_products'.tr,
               style: GoogleFonts.poppins(
-                fontSize: 15,
+                fontSize: 13,
                 fontWeight: FontWeight.w700,
                 color: AppColors.textPrimary,
               ),
@@ -612,9 +689,9 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
             gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: cols,
-              crossAxisSpacing: 14,
-              mainAxisSpacing: 14,
-              mainAxisExtent: Responsive.cardExtent(context),
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              mainAxisExtent: 264,
             ),
           ),
         );
@@ -651,16 +728,16 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: cols,
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            mainAxisExtent: 265,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            mainAxisExtent: 264,
           ),
         ),
       );
     });
   }
 
-  // ── Load more ──────────────────────────────────────────────────────────────
+  // ── Load more (auto on scroll) ─────────────────────────────────────────────
 
   Widget _buildLoadMore() {
     return Obx(() {
@@ -679,40 +756,18 @@ class HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         );
       }
-      if (!pp.hasMore.value) return const SizedBox.shrink();
-
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-        child: SizedBox(
-          width: double.infinity,
-          child: OutlinedButton(
-            onPressed: pp.isLoading.value ? null : () => pp.fetchProducts(),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppColors.primary,
-              side: BorderSide(color: AppColors.primary, width: 1.5),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-              padding: const EdgeInsets.symmetric(vertical: 14),
+      if (pp.isLoading.value && pp.products.isNotEmpty) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: CircularProgressIndicator(
+              color: AppColors.primary,
+              strokeWidth: 2,
             ),
-            child: pp.isLoading.value
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      color: AppColors.primary,
-                      strokeWidth: 2,
-                    ),
-                  )
-                : Text(
-                    'load_more'.tr,
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
           ),
-        ),
-      );
+        );
+      }
+      return const SizedBox.shrink();
     });
   }
 
@@ -806,14 +861,14 @@ class _AppBarIcon extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           Container(
-            width: 40,
-            height: 40,
+            width: 34,
+            height: 34,
             decoration: BoxDecoration(
               color: AppColors.card,
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(10),
               border: Border.all(color: AppColors.border, width: 1),
             ),
-            child: Icon(icon, size: 20, color: AppColors.textPrimary),
+            child: Icon(icon, size: 17, color: AppColors.textPrimary),
           ),
           if (badgeCount > 0)
             Positioned(
@@ -860,10 +915,10 @@ class _SearchBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 46,
+      height: 40,
       decoration: BoxDecoration(
         color: AppColors.surface,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: AppColors.border, width: 1),
       ),
       child: TextField(
@@ -871,25 +926,25 @@ class _SearchBar extends StatelessWidget {
         onChanged: onChanged,
         onSubmitted: onSubmit,
         style: GoogleFonts.poppins(
-          fontSize: 13,
+          fontSize: 12,
           color: AppColors.textPrimary,
         ),
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           hintText: 'search_hint'.tr,
           hintStyle: GoogleFonts.poppins(
-            fontSize: 13,
+            fontSize: 12,
             color: AppColors.textMedium,
           ),
           prefixIcon:
-              Icon(Icons.search_rounded, color: AppColors.textMedium, size: 20),
+              Icon(Icons.search_rounded, color: AppColors.textMedium, size: 18),
           suffixIcon: ValueListenableBuilder<TextEditingValue>(
             valueListenable: controller,
             builder: (_, value, __) => value.text.isNotEmpty
                 ? GestureDetector(
                     onTap: onClear,
                     child: Icon(Icons.close_rounded,
-                        color: AppColors.textMedium, size: 18),
+                        color: AppColors.textMedium, size: 16),
                   )
                 : const SizedBox.shrink(),
           ),
@@ -897,7 +952,7 @@ class _SearchBar extends StatelessWidget {
           enabledBorder: InputBorder.none,
           focusedBorder: InputBorder.none,
           contentPadding:
-              const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+              const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
           isDense: true,
         ),
       ),
@@ -920,7 +975,7 @@ class _SectionHeader extends StatelessWidget {
           Text(
             title,
             style: GoogleFonts.poppins(
-              fontSize: 17,
+              fontSize: 14,
               fontWeight: FontWeight.w700,
               color: AppColors.textPrimary,
             ),
@@ -932,7 +987,7 @@ class _SectionHeader extends StatelessWidget {
               child: Text(
                 'see_all'.tr,
                 style: GoogleFonts.poppins(
-                  fontSize: 13,
+                  fontSize: 12,
                   fontWeight: FontWeight.w500,
                   color: AppColors.primary,
                 ),
@@ -1065,15 +1120,12 @@ class _DynamicBannerCarouselState extends State<_DynamicBannerCarousel> {
         WidgetsBinding.instance.addPostFrameCallback((_) => _startTimer(count));
 
         return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 5, 20, 0),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
           child: Column(
             children: [
               LayoutBuilder(
                 builder: (ctx, constraints) {
-                  // Scale height with available width so the full banner
-                  // is visible on wide tablets — target ~3.2:1 aspect ratio,
-                  // clamped so phones stay at 160 and tablets cap at 220.
-                  final h = (constraints.maxWidth / 3.2).clamp(160.0, 220.0);
+                  final h = (constraints.maxWidth / 4.2).clamp(110.0, 155.0);
                   return SizedBox(
                     height: h,
                     child: PageView.builder(
@@ -1090,7 +1142,7 @@ class _DynamicBannerCarouselState extends State<_DynamicBannerCarousel> {
                   );
                 },
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               SmoothPageIndicator(
                 controller: _pageCtrl,
                 count: count,

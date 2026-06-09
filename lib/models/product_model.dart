@@ -23,6 +23,7 @@ class ProductModel {
   final bool isActive;
   final String barcode;
   final double? originalPrice; // cost / purchase price (optional)
+  final String gender; // 'male', 'female', 'baby', or ''
 
   const ProductModel({
     required this.id,
@@ -46,6 +47,7 @@ class ProductModel {
     this.isActive = true,
     this.barcode = '',
     this.originalPrice,
+    this.gender = '',
   });
 
   double get discountedPrice {
@@ -123,6 +125,7 @@ class ProductModel {
       originalPrice: json['originalPrice'] != null
           ? parseDouble(json['originalPrice'])
           : null,
+      gender: json['gender'] ?? '',
     );
   }
 
@@ -148,6 +151,7 @@ class ProductModel {
         'isActive': isActive,
         'barcode': barcode,
         if (originalPrice != null) 'originalPrice': originalPrice,
+        'gender': gender,
       };
 
   ProductModel copyWith({
@@ -172,6 +176,7 @@ class ProductModel {
     bool? isActive,
     String? barcode,
     double? originalPrice,
+    String? gender,
   }) {
     return ProductModel(
       id: id ?? this.id,
@@ -195,6 +200,7 @@ class ProductModel {
       isActive: isActive ?? this.isActive,
       barcode: barcode ?? this.barcode,
       originalPrice: originalPrice ?? this.originalPrice,
+      gender: gender ?? this.gender,
     );
   }
 }

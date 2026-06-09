@@ -24,8 +24,8 @@ class CategoryChip extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
-        margin: const EdgeInsets.only(right: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           color: isSelected ? AppColors.primary : AppColors.card,
           borderRadius: BorderRadius.circular(50),
@@ -37,8 +37,8 @@ class CategoryChip extends StatelessWidget {
               ? [
                   BoxShadow(
                     color: AppColors.primary.withValues(alpha: 0.35),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
                   ),
                 ]
               : [],
@@ -46,32 +46,30 @@ class CategoryChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Image if available, otherwise emoji fallback
             if (category.image.isNotEmpty)
               ClipRRect(
-                borderRadius: BorderRadius.circular(4),
+                borderRadius: BorderRadius.circular(3),
                 child: CachedNetworkImage(
                   imageUrl: UploadService.fixUrl(category.image),
-                  width: 22,
-                  height: 22,
+                  width: 18,
+                  height: 18,
                   fit: BoxFit.cover,
                   errorWidget: (_, __, ___) => Text(
                     category.icon.isNotEmpty ? category.icon : '🛍️',
-                    style: const TextStyle(fontSize: 15),
+                    style: const TextStyle(fontSize: 13),
                   ),
                 ),
               )
             else
               Text(
                 category.icon.isNotEmpty ? category.icon : '🛍️',
-                style: const TextStyle(fontSize: 15),
+                style: const TextStyle(fontSize: 13),
               ),
-            const SizedBox(width: 6),
-            // Name
+            const SizedBox(width: 5),
             AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 250),
               style: GoogleFonts.poppins(
-                fontSize: 13,
+                fontSize: 11,
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                 color: isSelected ? Colors.white : AppColors.textLight,
               ),
@@ -102,8 +100,8 @@ class AllCategoryChip extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
-        margin: const EdgeInsets.only(right: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           color: isSelected ? AppColors.primary : AppColors.card,
           borderRadius: BorderRadius.circular(50),
@@ -115,8 +113,8 @@ class AllCategoryChip extends StatelessWidget {
               ? [
                   BoxShadow(
                     color: AppColors.primary.withValues(alpha: 0.35),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
                   ),
                 ]
               : [],
@@ -124,12 +122,12 @@ class AllCategoryChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('🌟', style: TextStyle(fontSize: 15)),
-            const SizedBox(width: 6),
+            const Text('🌟', style: TextStyle(fontSize: 13)),
+            const SizedBox(width: 5),
             AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 250),
               style: GoogleFonts.poppins(
-                fontSize: 13,
+                fontSize: 11,
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                 color: isSelected ? Colors.white : AppColors.textLight,
               ),

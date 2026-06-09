@@ -18,6 +18,7 @@ class ProductService {
     String sort = 'newest',
     double? minPrice,
     double? maxPrice,
+    String? gender,
     DocumentSnapshot? lastDoc,
     int limit = 12,
   }) async {
@@ -25,11 +26,11 @@ class ProductService {
 
     final bool hasCategory = categoryId != null && categoryId.isNotEmpty;
     final bool hasSearch   = search != null && search.isNotEmpty;
+    final bool hasGender   = gender != null && gender.isNotEmpty;
 
-    if (hasCategory || hasSearch) {
-      // Category filter or full-text search: fetch a large batch client-side.
-      // Firestore has no native full-text search, and combining orderBy with
-      // a text range would need a composite index — keep it simple.
+    if (hasCategory || hasSearch || hasGender) {
+      // Category/gender filter or full-text search: fetch a large batch client-side.
+      // Combining orderBy with where clauses needs composite indexes — keep it simple.
       if (hasCategory) {
         query = query.where('categoryId', isEqualTo: categoryId);
       }
@@ -86,8 +87,13 @@ class ProductService {
           .toList();
     }
 
-    // When a category is active, sort client-side to avoid composite indexes.
-    if (hasCategory) {
+    // Client-side gender filter
+    if (hasGender) {
+      products = products.where((p) => p.gender == gender).toList();
+    }
+
+    // When a category/gender is active, sort client-side to avoid composite indexes.
+    if (hasCategory || hasGender) {
       switch (sort) {
         case 'price_asc':
           products.sort((a, b) => a.price.compareTo(b.price));
@@ -109,9 +115,8 @@ class ProductService {
       }
     }
 
-    // For category-filtered results, pagination is handled client-side via the
-    // controller's reset/accumulate logic — return null lastDoc to signal no more pages.
-    final DocumentSnapshot? newLastDoc = hasCategory
+    // For category/gender-filtered results, pagination is client-side — return null lastDoc.
+    final DocumentSnapshot? newLastDoc = (hasCategory || hasGender)
         ? null
         : (snapshot.docs.isNotEmpty ? snapshot.docs.last : null);
 
@@ -321,6 +326,7 @@ class ProductService {
       colors: parseStringList(data['colors']),
       sold: parseInt(data['sold']),
       isActive: data['isActive'] ?? true,
+      gender: data['gender'] ?? '',
     );
   }
 }

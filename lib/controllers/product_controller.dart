@@ -17,6 +17,7 @@ class ProductController extends GetxController {
   final isCategoriesLoading = false.obs;
   final error = Rxn<String>();
   final selectedCategory = ''.obs;
+  final selectedGender = ''.obs;
   final searchQuery = ''.obs;
   final sortBy = 'newest'.obs;
   final hasMore = true.obs;
@@ -39,6 +40,7 @@ class ProductController extends GetxController {
         categoryId: selectedCategory.value.isNotEmpty ? selectedCategory.value : null,
         search: searchQuery.value.isNotEmpty ? searchQuery.value : null,
         sort: sortBy.value,
+        gender: selectedGender.value.isNotEmpty ? selectedGender.value : null,
         lastDoc: _lastDoc,
       );
       final newProducts = result['products'] as List<ProductModel>;
@@ -112,8 +114,15 @@ class ProductController extends GetxController {
     fetchProducts(reset: true);
   }
 
+  void setGender(String gender) {
+    if (selectedGender.value == gender) return;
+    selectedGender.value = gender;
+    fetchProducts(reset: true);
+  }
+
   void clearFilters() {
     selectedCategory.value = '';
+    selectedGender.value = '';
     searchQuery.value = '';
     sortBy.value = 'newest';
     fetchProducts(reset: true);

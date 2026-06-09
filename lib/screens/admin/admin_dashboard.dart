@@ -1899,6 +1899,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
   bool _isFeatured = false;
   bool _isLoading = false;
   bool _showManualUrl = false;
+  String _selectedGender = '';
 
   // Image
   File? _imageFile;
@@ -1929,6 +1930,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
       _sizesCtrl.text = p.sizes.join(', ');
       _colorsCtrl.text = p.colors.join(', ');
       _isFeatured = p.isFeatured;
+      _selectedGender = p.gender;
       _imageUrl = p.firstImage;
       _manualUrlCtrl.text = p.firstImage;
       _selectedCategoryId = p.category?.id;
@@ -2065,6 +2067,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
         'stock': int.tryParse(_stockCtrl.text) ?? 0,
         'discount': int.tryParse(_discCtrl.text) ?? 0,
         'isFeatured': _isFeatured,
+        'gender': _selectedGender,
         'isActive': true,
         'thumbnail': finalImageUrl,
         'images': finalImageUrl.isNotEmpty ? [finalImageUrl] : [],
@@ -2225,6 +2228,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           ]),
           const SizedBox(height: 14),
           _buildCategoryDropdown(),
+          const SizedBox(height: 14),
+          _buildGenderSelector(),
           const SizedBox(height: 14),
           _Field(
               ctrl: _sizesCtrl,
@@ -2554,6 +2559,69 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildGenderSelector() {
+    const options = [
+      {'key': '', 'label': 'အားလုံး'},
+      {'key': 'male', 'label': 'ကျား'},
+      {'key': 'female', 'label': 'မ'},
+      {'key': 'baby', 'label': 'ကလေး'},
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'အမျိုးအစား',
+          style: GoogleFonts.poppins(
+              color: AppColors.textMedium,
+              fontSize: 13,
+              fontWeight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: options.map((o) {
+            final key = o['key']!;
+            final isSelected = _selectedGender == key;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => setState(() => _selectedGender = key),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? AppColors.primary
+                        : AppColors.surface,
+                    borderRadius: BorderRadius.circular(50),
+                    border: Border.all(
+                      color: isSelected
+                          ? AppColors.primary
+                          : AppColors.border,
+                      width: isSelected ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Text(
+                    o['label']!,
+                    style: GoogleFonts.poppins(
+                      fontSize: 13,
+                      fontWeight: isSelected
+                          ? FontWeight.w600
+                          : FontWeight.w400,
+                      color: isSelected
+                          ? Colors.white
+                          : AppColors.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 
