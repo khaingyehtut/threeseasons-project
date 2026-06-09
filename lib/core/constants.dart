@@ -34,6 +34,8 @@ class AppConstants {
     return url;
   }
   static const String appName = 'TSfootwear';
+  static const String viberPhone = '+959750893900';
+  static const String tiktokUsername = '54threeseasons';
   static const String googleMapsApiKey = 'AIzaSyBXmJ-t25_VCKLFZRoXQhRibGiO4mIoRew';
   static const String tokenKey = 'auth_token';
   static const String userKey = 'user_data';

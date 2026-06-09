@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show max;
+import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
 
@@ -43,6 +45,7 @@ import '../../services/announcement_service.dart';
 import '../chat/chat_screen.dart';
 import 'pos_screen.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:palette_generator/palette_generator.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Firestore helper — converts a doc to a plain Map, Timestamps → ISO strings
@@ -1894,12 +1897,22 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
   final _stockCtrl = TextEditingController();
   final _discCtrl = TextEditingController();
   final _sizesCtrl = TextEditingController();
-  final _colorsCtrl = TextEditingController();
   final _manualUrlCtrl = TextEditingController();
   bool _isFeatured = false;
   bool _isLoading = false;
   bool _showManualUrl = false;
   String _selectedGender = '';
+
+  List<Color> _selectedColors = [];
+  List<Color> _suggestedColors = [];
+  bool _isExtractingColors = false;
+
+  // Eyedropper
+  bool _eyedropperMode = false;
+  ui.Image? _uiImage;
+  ByteData? _imageByteData;
+  Color? _pendingPickColor;
+  Offset? _pickIndicatorPos;
 
   // Image
   File? _imageFile;
@@ -1928,12 +1941,16 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
       _stockCtrl.text = p.stock.toString();
       _discCtrl.text = p.discount.toString();
       _sizesCtrl.text = p.sizes.join(', ');
-      _colorsCtrl.text = p.colors.join(', ');
+      _selectedColors = p.colors.map(_hexToColor).whereType<Color>().toList();
       _isFeatured = p.isFeatured;
       _selectedGender = p.gender;
       _imageUrl = p.firstImage;
       _manualUrlCtrl.text = p.firstImage;
       _selectedCategoryId = p.category?.id;
+      if (p.firstImage.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _fetchBytesForEyedropper(p.firstImage));
+      }
     }
   }
 
@@ -1948,7 +1965,6 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
     _stockCtrl.dispose();
     _discCtrl.dispose();
     _sizesCtrl.dispose();
-    _colorsCtrl.dispose();
     _manualUrlCtrl.dispose();
     super.dispose();
   }
@@ -1996,7 +2012,12 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
       _imageFile = kIsWeb ? null : File(picked.path);
       _imageBytes = bytes;
       _imageUrl = '';
+      _eyedropperMode = false;
+      _uiImage = null;
+      _imageByteData = null;
     });
+    _extractColorsFromImage();
+    _decodeForEyedropper(bytes);
   }
 
   void _snack(String msg, Color color) {
@@ -2050,11 +2071,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           .map((s) => s.trim())
           .where((s) => s.isNotEmpty)
           .toList();
-      final colors = _colorsCtrl.text
-          .split(',')
-          .map((s) => s.trim())
-          .where((s) => s.isNotEmpty)
-          .toList();
+      final colors = _selectedColors.map(_colorToHex).toList();
 
       final payload = <String, dynamic>{
         'name': _nameCtrl.text.trim(),
@@ -2125,6 +2142,9 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
         builder: (context, constraints) {
           final isTablet = constraints.maxWidth >= 700;
           return SingleChildScrollView(
+            physics: _eyedropperMode
+                ? const NeverScrollableScrollPhysics()
+                : const ClampingScrollPhysics(),
             padding: EdgeInsets.fromLTRB(
                 24, 12, 24, MediaQuery.of(context).viewInsets.bottom + 24),
             child: Center(
@@ -2236,11 +2256,6 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
               label: 'အရွယ်အစားများ',
               hint: 'ဥပမာ - S,M,L,XL သို့မဟုတ် 31,32,33,34'),
           const SizedBox(height: 14),
-          _Field(
-              ctrl: _colorsCtrl,
-              label: 'အရောင်များ',
-              hint: 'ဥပမာ - အနီ,အပြာ,အစိမ်း'),
-          const SizedBox(height: 14),
           _buildFeaturedToggle(),
         ],
       );
@@ -2266,6 +2281,8 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           const SizedBox(height: 8),
           _buildImagePicker(),
           const SizedBox(height: 16),
+          _buildColorPicker(),
+          const SizedBox(height: 16),
           _buildFormFields(),
           const SizedBox(height: 24),
           _buildSubmitButton(),
@@ -2273,11 +2290,11 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
         ],
       );
 
-  // ── Tablet: image left, fields right ─────────────────────────────────────
+  // ── Tablet: image + colors + submit left, fields right ───────────────────
   Widget _buildTabletLayout() => Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Left: image picker (fixed width)
+          // Left: image picker → color picker → submit button
           SizedBox(
             width: 320,
             child: Column(
@@ -2285,19 +2302,22 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
               children: [
                 const SizedBox(height: 8),
                 _buildImagePicker(),
+                const SizedBox(height: 16),
+                _buildColorPicker(),
+                const SizedBox(height: 24),
+                _buildSubmitButton(),
+                const SizedBox(height: 20),
               ],
             ),
           ),
           const SizedBox(width: 28),
-          // Right: all form fields
+          // Right: form fields only
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const SizedBox(height: 8),
                 _buildFormFields(),
-                const SizedBox(height: 24),
-                _buildSubmitButton(),
                 const SizedBox(height: 20),
               ],
             ),
@@ -2368,7 +2388,7 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
               child: CachedNetworkImage(
                 imageUrl: previewUrl,
                 width: double.infinity,
-                height: 140,
+                height: 220,
                 fit: BoxFit.cover,
                 errorWidget: (_, __, ___) => Container(
                   height: 60,
@@ -2386,36 +2406,35 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
         ] else ...[
           // ── File picker ───────────────────────────────────
           if (_imageBytes != null)
-            // Use in-memory bytes — works even if the cache file was evicted
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: Image.memory(
-                _imageBytes!,
-                width: double.infinity,
-                height: 160,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  height: 160,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                      color: AppColors.surface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.error)),
-                  child: Text('ပုံဖော်မပြနိုင်ပါ',
-                      style: GoogleFonts.poppins(
-                          color: AppColors.error, fontSize: 12)),
+              child: LayoutBuilder(
+                builder: (_, constraints) => _buildEyedropperStack(
+                  constraints: constraints,
+                  child: Image.memory(
+                    _imageBytes!,
+                    width: double.infinity,
+                    height: 220,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _imagePlaceholderBox(),
+                  ),
                 ),
               ),
             )
           else if (previewUrl.isNotEmpty)
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: CachedNetworkImage(
-                imageUrl: previewUrl,
-                width: double.infinity,
-                height: 160,
-                fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => _imagePlaceholderBox(),
+              child: LayoutBuilder(
+                builder: (_, constraints) => _buildEyedropperStack(
+                  constraints: constraints,
+                  child: CachedNetworkImage(
+                    imageUrl: previewUrl,
+                    width: double.infinity,
+                    height: 220,
+                    fit: BoxFit.cover,
+                    errorWidget: (_, __, ___) => _imagePlaceholderBox(),
+                  ),
+                ),
               ),
             )
           else
@@ -2638,6 +2657,555 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
           activeThumbColor: AppColors.primary,
         ),
       ],
+    );
+  }
+
+  // ── Color helpers ─────────────────────────────────────────────────────────
+
+  static String _colorToHex(Color c) =>
+      '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+  static Color? _hexToColor(String hex) {
+    try {
+      final clean = hex.startsWith('#') ? hex.substring(1) : hex;
+      if (clean.length == 6) return Color(int.parse('FF$clean', radix: 16));
+    } catch (_) {}
+    return null;
+  }
+
+  static Color _contrastColor(Color c) =>
+      c.computeLuminance() > 0.4 ? Colors.black87 : Colors.white;
+
+  Future<void> _extractColorsFromImage() async {
+    if (!mounted) return;
+    setState(() => _isExtractingColors = true);
+    try {
+      ImageProvider? provider;
+      if (_imageBytes != null) {
+        provider = MemoryImage(_imageBytes!);
+      } else if (_imageUrl.isNotEmpty) {
+        provider = NetworkImage(AppConstants.fixImageUrl(_imageUrl));
+      }
+      if (provider == null) return;
+
+      final palette = await PaletteGenerator.fromImageProvider(
+        provider,
+        maximumColorCount: 16,
+      );
+
+      final seen = <String>{};
+      final colors = <Color>[];
+      void tryAdd(PaletteColor? pc) {
+        if (pc == null) return;
+        final hex = _colorToHex(pc.color);
+        if (seen.add(hex)) colors.add(pc.color);
+      }
+
+      tryAdd(palette.dominantColor);
+      tryAdd(palette.vibrantColor);
+      tryAdd(palette.lightVibrantColor);
+      tryAdd(palette.darkVibrantColor);
+      tryAdd(palette.mutedColor);
+      tryAdd(palette.lightMutedColor);
+      tryAdd(palette.darkMutedColor);
+      for (final pc in palette.paletteColors.take(10)) {
+        tryAdd(pc);
+      }
+
+      if (mounted) setState(() => _suggestedColors = colors);
+    } catch (_) {}
+    if (mounted) setState(() => _isExtractingColors = false);
+  }
+
+  // ── Eyedropper ────────────────────────────────────────────────────────────
+
+  Future<void> _fetchBytesForEyedropper(String url) async {
+    if (url.isEmpty || !mounted) return;
+    try {
+      final client = HttpClient();
+      final req = await client.getUrl(Uri.parse(AppConstants.fixImageUrl(url)));
+      final res = await req.close();
+      final bytes = await consolidateHttpClientResponseBytes(res);
+      client.close();
+      if (mounted) await _decodeForEyedropper(bytes);
+    } catch (_) {}
+  }
+
+  Future<void> _decodeForEyedropper(Uint8List bytes) async {
+    try {
+      // Decode at max 800 px wide — keeps RGBA buffer small (≤ ~2.5 MB),
+      // prevents OOM on high-res camera photos.
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 800);
+      final frame = await codec.getNextFrame();
+      final bd =
+          await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (!mounted) return;
+      setState(() {
+        _uiImage = frame.image;
+        _imageByteData = bd;
+      });
+    } catch (_) {}
+  }
+
+  Color? _samplePixel(Offset tapPos, Size widgetSize) {
+    final img = _uiImage;
+    final bd = _imageByteData;
+    if (img == null || bd == null) return null;
+
+    final iw = img.width.toDouble();
+    final ih = img.height.toDouble();
+    final ww = widgetSize.width;
+    final wh = widgetSize.height;
+
+    // BoxFit.cover pixel mapping
+    final scale = max(ww / iw, wh / ih);
+    final ox = (iw * scale - ww) / 2;
+    final oy = (ih * scale - wh) / 2;
+
+    final px = ((tapPos.dx + ox) / scale).round().clamp(0, img.width - 1);
+    final py = ((tapPos.dy + oy) / scale).round().clamp(0, img.height - 1);
+
+    final off = (py * img.width + px) * 4;
+    return Color.fromARGB(
+      255,
+      bd.getUint8(off),
+      bd.getUint8(off + 1),
+      bd.getUint8(off + 2),
+    );
+  }
+
+  void _onEyedropperPan(Offset pos, Size widgetSize) {
+    final color = _samplePixel(pos, widgetSize);
+    if (color != null) {
+      setState(() {
+        _pendingPickColor = color;
+        _pickIndicatorPos = pos;
+      });
+    }
+  }
+
+  void _commitEyedropperColor() {
+    if (_pendingPickColor == null) return;
+    // Exit eyedropper mode but keep _pendingPickColor so the user sees it
+    // in the color picker section and can tap "Add" to confirm.
+    setState(() {
+      _eyedropperMode = false;
+      _pickIndicatorPos = null;
+    });
+  }
+
+  // ── Eyedropper overlay helpers ────────────────────────────────────────────
+
+  Widget _buildEyedropperStack({
+    required Widget child,
+    required BoxConstraints constraints,
+  }) {
+    const imgH = 220.0;
+    final widgetSize = Size(constraints.maxWidth, imgH);
+    return Stack(
+      children: [
+        // ── Base image (no gesture handling here) ──────────────────────────
+        child,
+
+        // ── Eyedropper capture layer ────────────────────────────────────────
+        // Sits on top as Positioned.fill so it wins the gesture arena over the
+        // parent ScrollView.  HitTestBehavior.opaque claims all pointer events.
+        if (_eyedropperMode)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onPanDown: (d) => _onEyedropperPan(d.localPosition, widgetSize),
+              onPanUpdate: (d) => _onEyedropperPan(d.localPosition, widgetSize),
+              onPanEnd: (_) => _commitEyedropperColor(),
+            ),
+          ),
+
+        // ── Dim overlay (non-interactive) ───────────────────────────────────
+        if (_eyedropperMode)
+          Positioned.fill(
+            child: IgnorePointer(child: Container(color: Colors.black12)),
+          ),
+
+        // ── Toggle button ───────────────────────────────────────────────────
+        Positioned(
+          top: 8,
+          right: 8,
+          child: _buildEyedropperToggleButton(),
+        ),
+
+        // ── Color preview bubble ────────────────────────────────────────────
+        if (_eyedropperMode &&
+            _pickIndicatorPos != null &&
+            _pendingPickColor != null)
+          Positioned(
+            left: (_pickIndicatorPos!.dx - 20)
+                .clamp(0.0, constraints.maxWidth - 40),
+            top: (_pickIndicatorPos!.dy - 58).clamp(0.0, imgH - 44),
+            child: IgnorePointer(
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: _pendingPickColor,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 8)
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+        // ── Hint text ───────────────────────────────────────────────────────
+        if (_eyedropperMode)
+          Positioned(
+            bottom: 6,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 3),
+                  decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(10)),
+                  child: Text('ပုံပေါ် နှိပ်၍ အရောင်ရွေးပါ',
+                      style: GoogleFonts.poppins(
+                          color: Colors.white, fontSize: 11)),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildEyedropperToggleButton() {
+    final ready = _uiImage != null;
+    final loading = !ready && (_imageBytes != null || _imageUrl.isNotEmpty);
+    return GestureDetector(
+      onTap: ready
+          ? () => setState(() {
+                _eyedropperMode = !_eyedropperMode;
+                _pendingPickColor = null;
+                _pickIndicatorPos = null;
+              })
+          : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: _eyedropperMode ? AppColors.primary : Colors.black54,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: loading
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                    color: Colors.white, strokeWidth: 2))
+            : Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.colorize_rounded,
+                    color: Colors.white, size: 14),
+                const SizedBox(width: 4),
+                Text(
+                  _eyedropperMode ? 'Cancel' : 'Pick color',
+                  style:
+                      GoogleFonts.poppins(color: Colors.white, fontSize: 11),
+                ),
+              ]),
+      ),
+    );
+  }
+
+  // ── Color picker widget ───────────────────────────────────────────────────
+
+  Widget _buildColorPicker() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'အရောင်များ',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500),
+            ),
+            if (_imageBytes != null || _imageUrl.isNotEmpty)
+              _isExtractingColors
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child:
+                          CircularProgressIndicator(strokeWidth: 2))
+                  : GestureDetector(
+                      onTap: _extractColorsFromImage,
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.colorize_rounded,
+                            size: 16, color: AppColors.primary),
+                        const SizedBox(width: 4),
+                        Text('ပုံမှ ရှာရန်',
+                            style: GoogleFonts.poppins(
+                                color: AppColors.primary, fontSize: 12)),
+                      ]),
+                    ),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        // Suggested colors from image
+        if (_suggestedColors.isNotEmpty) ...[
+          Text('ပုံမှ အရောင်များ:',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium, fontSize: 11)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _suggestedColors.map((c) {
+              final hex = _colorToHex(c);
+              final picked =
+                  _selectedColors.any((s) => _colorToHex(s) == hex);
+              return GestureDetector(
+                onTap: () {
+                  if (!picked) setState(() => _selectedColors.add(c));
+                },
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: c,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: picked
+                          ? AppColors.primary
+                          : Colors.grey.shade300,
+                      width: picked ? 2.5 : 1,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                          color: c.withValues(alpha: 0.35),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2))
+                    ],
+                  ),
+                  child: picked
+                      ? Icon(Icons.check_rounded,
+                          size: 14, color: _contrastColor(c))
+                      : null,
+                ),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // ── Picked-color confirmation (shown after eyedropper lift) ──────────
+        if (_pendingPickColor != null && !_eyedropperMode) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                  color: AppColors.primary.withValues(alpha: 0.25), width: 1),
+            ),
+            child: Row(
+              children: [
+                // Large swatch preview
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: _pendingPickColor,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.grey.shade300),
+                    boxShadow: [
+                      BoxShadow(
+                          color: _pendingPickColor!.withValues(alpha: 0.4),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2))
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ပုံမှ ရွေးထားသော အရောင်',
+                        style: GoogleFonts.poppins(
+                            color: AppColors.textMedium, fontSize: 11),
+                      ),
+                      Text(
+                        _colorToHex(_pendingPickColor!),
+                        style: GoogleFonts.poppins(
+                            color: AppColors.textPrimary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                ),
+                // Add button
+                ElevatedButton(
+                  onPressed: () {
+                    final hex = _colorToHex(_pendingPickColor!);
+                    setState(() {
+                      if (!_selectedColors
+                          .any((c) => _colorToHex(c) == hex)) {
+                        _selectedColors.add(_pendingPickColor!);
+                      }
+                      _pendingPickColor = null;
+                    });
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                    elevation: 0,
+                  ),
+                  child: Text('Add',
+                      style: GoogleFonts.poppins(
+                          fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+                const SizedBox(width: 6),
+                // Discard button
+                GestureDetector(
+                  onTap: () => setState(() => _pendingPickColor = null),
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Icon(Icons.close_rounded,
+                        size: 14, color: AppColors.textMedium),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+
+        // Selected colors + add button
+        Row(children: [
+          Text('ရွေးချယ်ထားသော:',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium, fontSize: 11)),
+          const SizedBox(width: 4),
+          Text('${_selectedColors.length}',
+              style: GoogleFonts.poppins(
+                  color: AppColors.primary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600)),
+        ]),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            ..._selectedColors.map((c) => _AdminColorSwatch(
+                  color: c,
+                  onRemove: () =>
+                      setState(() => _selectedColors.remove(c)),
+                )),
+            GestureDetector(
+              onTap: _openCustomColorPicker,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border:
+                      Border.all(color: AppColors.primary, width: 1.5),
+                ),
+                child: Icon(Icons.add_rounded,
+                    color: AppColors.primary, size: 20),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _openCustomColorPicker() {
+    const presets = [
+      Color(0xFF000000), Color(0xFFFFFFFF), Color(0xFF9E9E9E),
+      Color(0xFF616161), Color(0xFFE74C3C), Color(0xFFC0392B),
+      Color(0xFF3498DB), Color(0xFF001F5B), Color(0xFF2ECC71),
+      Color(0xFF27AE60), Color(0xFFF39C12), Color(0xFFE67E22),
+      Color(0xFF9B59B6), Color(0xFFE91E8C), Color(0xFF795548),
+      Color(0xFFF5F5DC), Color(0xFF1ABC9C), Color(0xFF00BCD4),
+      Color(0xFFFF6B6B), Color(0xFF4ECDC4), Color(0xFFFECA57),
+      Color(0xFFFF9FF3), Color(0xFF48DBFB), Color(0xFF1DD1A1),
+    ];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.card,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('အရောင်ရွေးရန်',
+                style: GoogleFonts.poppins(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary)),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: presets.map((c) {
+                return GestureDetector(
+                  onTap: () {
+                    final hex = _colorToHex(c);
+                    final already = _selectedColors
+                        .any((s) => _colorToHex(s) == hex);
+                    if (!already) {
+                      setState(() => _selectedColors.add(c));
+                    }
+                    Navigator.of(context).pop();
+                  },
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: c,
+                      shape: BoxShape.circle,
+                      border:
+                          Border.all(color: Colors.grey.shade300, width: 1),
+                      boxShadow: [
+                        BoxShadow(
+                            color: c.withValues(alpha: 0.3),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2))
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -8895,6 +9463,55 @@ class _PaperChip extends StatelessWidget {
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
                 color: selected ? Colors.white : AppColors.textMedium)),
+      ),
+    );
+  }
+}
+
+class _AdminColorSwatch extends StatelessWidget {
+  const _AdminColorSwatch({required this.color, required this.onRemove});
+  final Color color;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.grey.shade300, width: 1),
+              boxShadow: [
+                BoxShadow(
+                    color: color.withValues(alpha: 0.4),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2))
+              ],
+            ),
+          ),
+          Positioned(
+            top: -2,
+            right: -2,
+            child: GestureDetector(
+              onTap: onRemove,
+              child: Container(
+                width: 16,
+                height: 16,
+                decoration: const BoxDecoration(
+                    color: Color(0xFFFF4757), shape: BoxShape.circle),
+                child: const Icon(Icons.close_rounded,
+                    size: 10, color: Colors.white),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

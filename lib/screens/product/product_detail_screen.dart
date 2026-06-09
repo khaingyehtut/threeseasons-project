@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:get/get.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme.dart';
 import '../../core/responsive.dart';
 import '../../controllers/auth_controller.dart';
@@ -87,6 +88,95 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       return false;
     }
     return true;
+  }
+
+  String _buildOrderMessage(ProductModel product) {
+    final buffer = StringBuffer();
+    buffer.write('Hello! I want to order:\n');
+    buffer.write('Product: ${product.name}\n');
+    buffer.write('Price: ${fmtPrice(product.discountedPrice)}\n');
+    if (_selectedSize != null) buffer.write('Size: $_selectedSize\n');
+    if (_selectedColor != null) {
+      final idx = product.colors.indexOf(_selectedColor!);
+      final label = idx >= 0
+          ? 'Color No.${idx + 1} (${_selectedColor!})'
+          : _selectedColor!;
+      buffer.write('Color: $label\n');
+    }
+    buffer.write('Qty: $_quantity\n');
+    final imageUrl = product.firstImage;
+    if (imageUrl.isNotEmpty) buffer.write('Image: $imageUrl');
+    return buffer.toString();
+  }
+
+  Future<void> _copyAndShow(String message, Color color) async {
+    await Clipboard.setData(ClipboardData(text: message));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.copy_rounded, color: Colors.white, size: 16),
+            const SizedBox(width: 8),
+            Text(
+              'Order details copied! Paste in chat.',
+              style: GoogleFonts.poppins(color: Colors.white, fontSize: 13),
+            ),
+          ],
+        ),
+        backgroundColor: color,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(seconds: 3),
+      ));
+    }
+  }
+
+  Future<void> _orderViaViber(ProductModel product) async {
+    final message = _buildOrderMessage(product);
+    // Copy to clipboard so user can paste if needed
+    await _copyAndShow(message, const Color(0xFF7360F2));
+    final msg = Uri.encodeComponent(message);
+    final phone = AppConstants.viberPhone.replaceAll('+', '').replaceAll(' ', '');
+    final uri = Uri.parse('viber://chat?number=$phone&text=$msg');
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Viber not installed. Number: 09750893900 (details copied)',
+            style: GoogleFonts.poppins(color: Colors.white, fontSize: 13),
+          ),
+          backgroundColor: const Color(0xFF7360F2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          duration: const Duration(seconds: 5),
+        ));
+      }
+    }
+  }
+
+  Future<void> _orderViaTikTok(ProductModel product) async {
+    final message = _buildOrderMessage(product);
+    // Copy to clipboard — user pastes it in TikTok DM
+    await _copyAndShow(message, Colors.black87);
+    final uri = Uri.parse('https://www.tiktok.com/@${AppConstants.tiktokUsername}');
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Could not open TikTok. Search @${AppConstants.tiktokUsername}',
+            style: GoogleFonts.poppins(color: Colors.white, fontSize: 13),
+          ),
+          backgroundColor: Colors.black,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          duration: const Duration(seconds: 4),
+        ));
+      }
+    }
   }
 
   void _addToCart(ProductModel product) async {
@@ -613,7 +703,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
           const SizedBox(height: 20),
           // Quantity selector
           _buildQuantitySelector(product),
-          const SizedBox(height: 28),
+          const SizedBox(height: 20),
+          // Order via Viber / TikTok
+          _buildOrderViaSection(product),
+          const SizedBox(height: 20),
           // Divider
           Divider(color: AppColors.border, thickness: 1),
           const SizedBox(height: 20),
@@ -788,26 +881,12 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Text(
-              'color'.tr,
-              style: GoogleFonts.poppins(
-                  color: AppColors.textPrimary,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600),
-            ),
-            if (_selectedColor != null) ...[
-              const SizedBox(width: 8),
-              Text(
-                _selectedColor!,
-                style: GoogleFonts.poppins(
-                    color: AppColors.primary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600),
-              ),
-            ],
-          ],
+        Text(
+          'color'.tr,
+          style: GoogleFonts.poppins(
+              color: AppColors.textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -1315,6 +1394,120 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
               );
             },
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOrderViaSection(ProductModel product) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Divider(color: AppColors.border)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Text(
+                'or order directly via',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  color: AppColors.textMedium,
+                ),
+              ),
+            ),
+            Expanded(child: Divider(color: AppColors.border)),
+          ],
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            // Viber button
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _orderViaViber(product),
+                child: Column(
+                  children: [
+                    Container(
+                      height: 48,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF7360F2),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('💬', style: TextStyle(fontSize: 18)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Order via Viber',
+                            style: GoogleFonts.poppins(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '09750893900',
+                      style: GoogleFonts.poppins(
+                        fontSize: 11,
+                        color: AppColors.textMedium,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            // TikTok button
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _orderViaTikTok(product),
+                child: Column(
+                  children: [
+                    Container(
+                      height: 48,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('🎵', style: TextStyle(fontSize: 18)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Order via TikTok',
+                            style: GoogleFonts.poppins(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '@${AppConstants.tiktokUsername}',
+                      style: GoogleFonts.poppins(
+                        fontSize: 11,
+                        color: AppColors.textMedium,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
