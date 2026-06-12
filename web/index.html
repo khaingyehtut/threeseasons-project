@@ -1,47 +1,151 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="TSfootwear - Modern Footwear Shop">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="သုံးရာသီ - Modern Footwear Shop">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="TSfootwear">
+  <meta name="apple-mobile-web-app-title" content="သုံးရာသီ">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>TSfootwear</title>
+  <title>သုံးရာသီ</title>
   <link rel="manifest" href="manifest.json">
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body { width: 100%; height: 100%; background: #ffffff; }
+
+    /* ── Splash loader ─────────────────────────────────────────── */
+    #flutter-loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #ffffff;
+      z-index: 9999;
+      opacity: 1;
+      transition: opacity 0.35s ease;
+    }
+
+    #flutter-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .splash-icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 24px;
+      background: linear-gradient(145deg, #6C63FF 0%, #4A42D8 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 22px;
+      box-shadow: 0 10px 30px rgba(108, 99, 255, 0.35);
+    }
+
+    .splash-icon svg {
+      width: 52px;
+      height: 52px;
+      fill: #ffffff;
+    }
+
+    .splash-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1a1a2e;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      font-family: 'Segoe UI', sans-serif;
+    }
+
+    .splash-subtitle {
+      font-size: 13px;
+      color: #9CA3AF;
+      margin-bottom: 36px;
+      font-family: 'Segoe UI', sans-serif;
+    }
+
+    .splash-dots {
+      display: flex;
+      gap: 8px;
+    }
+
+    .splash-dots span {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #6C63FF;
+      opacity: 0.25;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .splash-dots span:nth-child(1) { animation-delay: 0s; }
+    .splash-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .splash-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.25; transform: scale(1); }
+      50%       { opacity: 1;    transform: scale(1.3); }
+    }
+  </style>
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
 
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
+  <!-- Rendered by the browser immediately — no JS needed -->
+  <div id="flutter-loading">
+    <div class="splash-icon">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-1H2v1zm18-9c-.55 0-1
+          .45-1 1v1H9.93L7.5 7.5C7.19 6.59 6.35 6 5.4 6H4c-1.1 0-2 .9-2
+          2v8h20v-5c0-1.66-1.34-2-2-2z"/>
+      </svg>
+    </div>
+    <div class="splash-title">သုံးရာသီ</div>
+    <div class="splash-subtitle">ဖိနပ်ဆိုင်</div>
+    <div class="splash-dots">
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+
+  <!--
+    Watch for Flutter's root element (flt-glass-pane) to appear,
+    then fade out the splash. This fires at the exact moment Flutter
+    is ready — no guessing with timers or the 'load' event.
   -->
-  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBXmJ-t25_VCKLFZRoXQhRibGiO4mIoRew"></script>
+  <script>
+    (function () {
+      var observer = new MutationObserver(function () {
+        if (document.querySelector('flt-glass-pane')) {
+          observer.disconnect();
+          var el = document.getElementById('flutter-loading');
+          if (!el) return;
+          el.classList.add('fade-out');
+          setTimeout(function () { el.remove(); }, 380);
+        }
+      });
+      observer.observe(document.body, { childList: true });
+    })();
+  </script>
+
+  <!-- Google Maps — async so it never blocks Flutter startup -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBXmJ-t25_VCKLFZRoXQhRibGiO4mIoRew" async defer></script>
+
+  <!-- async: Flutter starts the moment this file is downloaded, without
+       waiting for the rest of the page to finish loading -->
   <script src="flutter_bootstrap.js" async></script>
+
 </body>
 </html>

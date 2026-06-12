@@ -22,7 +22,9 @@ class BtPrinterService extends GetxController with WidgetsBindingObserver {
 
   static const _keyAddress = 'pos_bt_address';
   static const _keyName = 'pos_bt_name';
-  static const _pingInterval = Duration(seconds: 15);
+  static const _pingInterval = Duration(seconds: 8);
+  static const _maxReconnectAttempts = 4;
+  static const _reconnectDelay = Duration(seconds: 3);
 
   Timer? _pingTimer;
   bool _autoReconnecting = false;
@@ -68,9 +70,19 @@ class BtPrinterService extends GetxController with WidgetsBindingObserver {
     if (device == null) return;
     _autoReconnecting = true;
     try {
-      await BtNative.connect(device);
-      isConnected.value = await BtNative.isConnected;
-    } catch (_) {
+      for (int attempt = 1; attempt <= _maxReconnectAttempts; attempt++) {
+        try {
+          await BtNative.disconnect();
+        } catch (_) {}
+        try {
+          await BtNative.connect(device);
+          isConnected.value = await BtNative.isConnected;
+          if (isConnected.value) return;
+        } catch (_) {}
+        if (attempt < _maxReconnectAttempts) {
+          await Future.delayed(_reconnectDelay);
+        }
+      }
       isConnected.value = false;
     } finally {
       _autoReconnecting = false;
@@ -189,17 +201,22 @@ class BtPrinterService extends GetxController with WidgetsBindingObserver {
   }
 
   Future<bool> printImage(Uint8List bytes) async {
-    if (kIsWeb || !isConnected.value) return false;
+    if (kIsWeb) return false;
+    if (!isConnected.value) await _autoReconnect();
+    if (!isConnected.value) return false;
     try {
       await BtNative.printImage(bytes);
       return true;
     } catch (_) {
+      isConnected.value = false;
       return false;
     }
   }
 
   Future<bool> printReceipt(PosSaleModel sale, {int paperWidth = 80}) async {
-    if (kIsWeb || !isConnected.value) return false;
+    if (kIsWeb) return false;
+    if (!isConnected.value) await _autoReconnect();
+    if (!isConnected.value) return false;
     try {
       final charsPerLine = paperWidth == 58 ? 32 : 48;
       final prefs = await SharedPreferences.getInstance();

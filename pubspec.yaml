@@ -1,7 +1,7 @@
 name: three_seasons_project
 description: "Three Seasons - Modern Ecommerce App"
 publish_to: "none"
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: ^3.5.0
@@ -67,6 +67,9 @@ dependencies:
   # Utilities
   intl: ^0.19.0
   timeago: ^3.7.0
+
+  # Barcode scanning (camera)
+  mobile_scanner: ^5.2.3
 
   # POS printing
   pdf: ^3.10.8

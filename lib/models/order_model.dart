@@ -102,25 +102,39 @@ class OrderModel {
 
   Color get statusColor {
     switch (status.toLowerCase()) {
-      case 'pending':   return const Color(0xFFF59E0B);
-      case 'processing': return const Color(0xFF3B82F6);
-      case 'shipped':   return const Color(0xFF8B5CF6);
-      case 'delivered': return const Color(0xFF10B981);
-      case 'cancelled': return const Color(0xFFEF4444);
-      case 'refunded':  return const Color(0xFF6B7280);
-      default:          return const Color(0xFF6B7280);
+      case 'pending':
+        return const Color(0xFFF59E0B);
+      case 'processing':
+        return const Color(0xFF3B82F6);
+      case 'shipped':
+        return const Color(0xFF8B5CF6);
+      case 'delivered':
+        return const Color(0xFF10B981);
+      case 'cancelled':
+        return const Color(0xFFEF4444);
+      case 'refunded':
+        return const Color(0xFF6B7280);
+      default:
+        return const Color(0xFF6B7280);
     }
   }
 
   String get statusLabel {
     switch (status.toLowerCase()) {
-      case 'pending':    return 'Pending';
-      case 'processing': return 'Processing';
-      case 'shipped':    return 'Shipped';
-      case 'delivered':  return 'Delivered';
-      case 'cancelled':  return 'Cancelled';
-      case 'refunded':   return 'Refunded';
-      default:           return status;
+      case 'pending':
+        return 'Pending';
+      case 'processing':
+        return 'Processing';
+      case 'shipped':
+        return 'Shipped';
+      case 'delivered':
+        return 'Delivered';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'refunded':
+        return 'Refunded';
+      default:
+        return status;
     }
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:go_router/go_router.dart';
@@ -23,6 +25,24 @@ import '../screens/profile/profile_screen.dart' deferred as profile_screen;
 import '../screens/wishlist/wishlist_screen.dart' deferred as wishlist_screen;
 import '../screens/notifications/notifications_screen.dart' deferred as noti_screen;
 import '../screens/payment/payment_screen.dart' deferred as payment_screen;
+
+// ── Auth listenable ───────────────────────────────────────────────────────────
+
+// Notifies GoRouter whenever the Firebase Auth session changes so the redirect
+// is re-evaluated automatically — without requiring a new navigation event.
+class _AuthListenable extends ChangeNotifier {
+  late final StreamSubscription<User?> _sub;
+  _AuthListenable() {
+    _sub = FirebaseAuth.instance.authStateChanges().listen((_) {
+      notifyListeners();
+    });
+  }
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+}
 
 // ── Deferred loading helper ───────────────────────────────────────────────────
 
@@ -86,17 +106,28 @@ class AppRouter {
   static final _rootKey = GlobalKey<NavigatorState>();
   static GoRouter get router => _router;
 
+  static final _authListenable = _AuthListenable();
+
   static final GoRouter _router = GoRouter(
     navigatorKey: _rootKey,
     initialLocation: '/',
     debugLogDiagnostics: false,
+    // Re-evaluate redirect whenever Firebase Auth session changes.
+    refreshListenable: _authListenable,
     redirect: (context, state) {
-      final isLoggedIn = Get.find<AuthController>().isLoggedIn;
-      final isAdmin    = Get.find<AuthController>().isAdmin;
-      final loc = state.matchedLocation;
+      final auth = Get.find<AuthController>();
+      final loc  = state.matchedLocation;
 
-      const protected = ['/cart', '/orders', '/profile',
-        '/wishlist', '/notifications', '/payment', '/chats'];
+      // Use Firebase Auth directly — it's synchronous and always up-to-date,
+      // even while AuthController.initialize() is still fetching the profile.
+      final firebaseUser = FirebaseAuth.instance.currentUser;
+      final isLoggedIn   = firebaseUser != null || auth.isLoggedIn;
+      final isAdmin      = auth.isAdmin;
+
+      const protected = [
+        '/cart', '/orders', '/profile',
+        '/wishlist', '/notifications', '/payment', '/chats',
+      ];
       if (protected.any((p) => loc.startsWith(p)) && !isLoggedIn) {
         return '/login';
       }
@@ -104,11 +135,11 @@ class AppRouter {
       return null;
     },
     routes: [
-      GoRoute(path: '/',               builder: (_, __) => const SplashScreen()),
-      GoRoute(path: '/login',          builder: (_, __) => const LoginScreen()),
-      GoRoute(path: '/register',       builder: (_, __) => const RegisterScreen()),
-      GoRoute(path: '/forgot-password',builder: (_, __) => const ForgotPasswordScreen()),
-      GoRoute(path: '/main',           builder: (_, __) => const MainScreen()),
+      GoRoute(path: '/',                builder: (_, __) => const SplashScreen()),
+      GoRoute(path: '/login',           builder: (_, __) => const LoginScreen()),
+      GoRoute(path: '/register',        builder: (_, __) => const RegisterScreen()),
+      GoRoute(path: '/forgot-password', builder: (_, __) => const ForgotPasswordScreen()),
+      GoRoute(path: '/main',            builder: (_, __) => const MainScreen()),
 
       GoRoute(
         path: '/admin',

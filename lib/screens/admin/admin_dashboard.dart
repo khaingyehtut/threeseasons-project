@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show max;
+import 'dart:math' show max, Random;
 import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -44,6 +44,7 @@ import '../../models/announcement_model.dart';
 import '../../services/announcement_service.dart';
 import '../chat/chat_screen.dart';
 import 'pos_screen.dart';
+import 'label_print_screen.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:palette_generator/palette_generator.dart';
 
@@ -65,6 +66,24 @@ class AdminProductsPage extends StatelessWidget {
   const AdminProductsPage({super.key});
   @override
   Widget build(BuildContext context) => const _AdminProductsTab();
+}
+
+class AdminOrdersPage extends StatelessWidget {
+  const AdminOrdersPage({super.key});
+  @override
+  Widget build(BuildContext context) => const _AdminOrdersTab();
+}
+
+class AdminChatPage extends StatelessWidget {
+  const AdminChatPage({super.key});
+  @override
+  Widget build(BuildContext context) => const _AdminChatTab();
+}
+
+class AdminPaymentsPage extends StatelessWidget {
+  const AdminPaymentsPage({super.key});
+  @override
+  Widget build(BuildContext context) => const _AdminPaymentsTab();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1125,6 +1144,9 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
   List<ProductModel> _filtered = [];
   final _searchCtrl = TextEditingController();
   final _searchFocus = FocusNode();
+  String _sortMode = 'date_desc';   // 'date_desc' | 'name'
+  String _genderFilter = 'all';     // 'all' | 'male' | 'female' | 'baby'
+  final Map<String, DateTime> _createdAtMap = {};
 
   @override
   void initState() {
@@ -1171,15 +1193,19 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
     try {
       final snap =
           await FirebaseFirestore.instance.collection('products').get();
+      _createdAtMap.clear();
       _products = snap.docs.map((doc) {
         final m = _docToMap(doc);
-        // Ensure category is a proper Map
         if (m['category'] is Map) {
           m['category'] = Map<String, dynamic>.from(m['category'] as Map);
         }
+        final ca = m['createdAt'] as String?;
+        _createdAtMap[doc.id] =
+            (ca != null ? DateTime.tryParse(ca) : null) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
         return ProductModel.fromJson(m);
       }).toList();
-      _products.sort((a, b) => a.name.compareTo(b.name));
+      _sortProducts();
       _applyFilter(_searchCtrl.text);
       setState(() => _isLoading = false);
     } catch (e) {
@@ -1190,12 +1216,27 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
     }
   }
 
+  void _sortProducts() {
+    if (_sortMode == 'date_desc') {
+      _products.sort((a, b) {
+        final da = _createdAtMap[a.id] ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final db = _createdAtMap[b.id] ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return db.compareTo(da);
+      });
+    } else {
+      _products.sort((a, b) => a.name.compareTo(b.name));
+    }
+  }
+
   void _applyFilter(String q) {
     final query = q.toLowerCase();
+    final base = _genderFilter == 'all'
+        ? List<ProductModel>.from(_products)
+        : _products.where((p) => p.gender == _genderFilter).toList();
     setState(() {
       _filtered = query.isEmpty
-          ? List.from(_products)
-          : _products
+          ? base
+          : base
               .where((p) =>
                   p.name.toLowerCase().contains(query) ||
                   p.barcode.toLowerCase().contains(query) ||
@@ -1262,33 +1303,133 @@ class _AdminProductsTabState extends State<_AdminProductsTab> {
       ),
       body: Column(
         children: [
-          _buildSearchBar(),
+          _buildSearchAndFilters(),
           Expanded(child: _buildBody()),
         ],
       ),
     );
   }
 
-  Widget _buildSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      child: TextField(
-        controller: _searchCtrl,
-        focusNode: _searchFocus,
-        onChanged: _applyFilter,
-        style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
-        decoration: InputDecoration(
-          hintText: 'နာမည် / ဘားကုဒ် / အမျိုးအစား ရှာမည်…',
-          prefixIcon: Icon(Icons.search_rounded, color: AppColors.textMedium),
-          suffixIcon: _searchCtrl.text.isNotEmpty
-              ? IconButton(
-                  icon: Icon(Icons.clear_rounded, color: AppColors.textMedium),
-                  onPressed: () {
-                    _searchCtrl.clear();
-                    _applyFilter('');
-                  })
-              : Icon(Icons.qr_code_scanner_rounded,
-                  color: AppColors.textMedium, size: 20),
+  Widget _buildSearchAndFilters() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Search field ──────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+          child: TextField(
+            controller: _searchCtrl,
+            focusNode: _searchFocus,
+            onChanged: _applyFilter,
+            style:
+                GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
+            decoration: InputDecoration(
+              hintText: 'နာမည် / ဘားကုဒ် / အမျိုးအစား ရှာမည်…',
+              prefixIcon:
+                  Icon(Icons.search_rounded, color: AppColors.textMedium),
+              suffixIcon: _searchCtrl.text.isNotEmpty
+                  ? IconButton(
+                      icon: Icon(Icons.clear_rounded,
+                          color: AppColors.textMedium),
+                      onPressed: () {
+                        _searchCtrl.clear();
+                        _applyFilter('');
+                      })
+                  : Icon(Icons.qr_code_scanner_rounded,
+                      color: AppColors.textMedium, size: 20),
+            ),
+          ),
+        ),
+        // ── Sort + Gender chips ───────────────────────────────────
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: Row(
+            children: [
+              // Sort chips
+              _chip(
+                label: 'နောက်ဆုံး',
+                icon: Icons.schedule_rounded,
+                selected: _sortMode == 'date_desc',
+                onTap: () {
+                  if (_sortMode == 'date_desc') return;
+                  setState(() => _sortMode = 'date_desc');
+                  _sortProducts();
+                  _applyFilter(_searchCtrl.text);
+                },
+              ),
+              const SizedBox(width: 6),
+              _chip(
+                label: 'နာမည်',
+                icon: Icons.sort_by_alpha_rounded,
+                selected: _sortMode == 'name',
+                onTap: () {
+                  if (_sortMode == 'name') return;
+                  setState(() => _sortMode = 'name');
+                  _sortProducts();
+                  _applyFilter(_searchCtrl.text);
+                },
+              ),
+              const SizedBox(width: 12),
+              // Gender chips
+              ...([
+                ('အားလုံး', 'all'),
+                ('ကျား', 'male'),
+                ('မ', 'female'),
+                ('ကလေး', 'baby'),
+              ].map((g) => Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: _chip(
+                      label: g.$1,
+                      selected: _genderFilter == g.$2,
+                      onTap: () {
+                        if (_genderFilter == g.$2) return;
+                        setState(() => _genderFilter = g.$2);
+                        _applyFilter(_searchCtrl.text);
+                      },
+                    ),
+                  ))),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip({
+    required String label,
+    IconData? icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : AppColors.card,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+              color: selected ? AppColors.primary : AppColors.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon,
+                  size: 13,
+                  color: selected ? Colors.white : AppColors.textMedium),
+              const SizedBox(width: 4),
+            ],
+            Text(label,
+                style: GoogleFonts.poppins(
+                    fontSize: 12,
+                    fontWeight:
+                        selected ? FontWeight.w600 : FontWeight.w400,
+                    color:
+                        selected ? Colors.white : AppColors.textPrimary)),
+          ],
         ),
       ),
     );
@@ -2108,9 +2249,66 @@ class _ProductFormSheetState extends State<_ProductFormSheet> {
         await db.collection('products').doc(widget.product!.id).update(payload);
       }
 
-      if (mounted) {
-        Navigator.of(context).pop();
-        widget.onSaved();
+      if (!mounted) return;
+
+      final savedBarcode = _barcodeCtrl.text.trim();
+      final savedPrice = double.tryParse(_priceCtrl.text.trim()) ?? 0.0;
+      final fmt = NumberFormat('#,###');
+      final priceLabel =
+          savedPrice > 0 ? '${fmt.format(savedPrice)} Ks' : '';
+
+      final shouldPrint = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.card,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16)),
+          title: Text('Label ရိုက်မလား?',
+              style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                  fontSize: 16)),
+          content: Text(
+              'ဤထုတ်ကုန်အတွက် ဂေါ်ပတ် label ရိုက်မည်လား?',
+              style: GoogleFonts.poppins(
+                  fontSize: 13, color: AppColors.textMedium)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('မလုပ်တော့',
+                  style: GoogleFonts.poppins(
+                      color: AppColors.textMedium)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
+              ),
+              child: Text('ရိုက်မည်',
+                  style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      );
+
+      if (!mounted) return;
+      // Capture the navigator BEFORE popping — the NavigatorState stays
+      // alive after its route is removed, so we can still push onto it.
+      final nav = Navigator.of(context);
+      nav.pop(); // pop the product form sheet
+      widget.onSaved();
+
+      if (shouldPrint == true) {
+        nav.push(MaterialPageRoute(
+          builder: (_) => LabelPrintScreen(
+            initialBarcode: savedBarcode,
+            initialTopText: priceLabel,
+          ),
+        ));
       }
     } catch (e) {
       if (mounted) _snack(e.toString(), AppColors.error);
@@ -5512,7 +5710,18 @@ class _BarcodeInputFieldState extends State<_BarcodeInputField> {
                       strokeWidth: 2, color: AppColors.primary),
                 ),
               )
-            : null,
+            : IconButton(
+                tooltip: '7-digit barcode ထုတ်မည်',
+                icon: const Icon(Icons.casino_rounded, size: 18),
+                onPressed: () {
+                  final code = List.generate(
+                          7, (_) => Random().nextInt(10))
+                      .join();
+                  widget.ctrl.text = code;
+                  widget.ctrl.selection =
+                      TextSelection.collapsed(offset: code.length);
+                },
+              ),
         labelStyle: _scanning ? TextStyle(color: AppColors.primary) : null,
       ),
     );
@@ -7282,6 +7491,15 @@ class _AdminManageTabState extends State<_AdminManageTab> {
         subtitle: _lowStock > 0 ? '$_lowStock ခု နည်းနေသည်' : null,
         page: const _LowStockTab(),
       ),
+      _ManageItem(
+        label: 'Label ရိုက်ရန်',
+        icon: Icons.label_rounded,
+        gradient: const LinearGradient(
+            colors: [Color(0xFF00B4D8), Color(0xFF0096C7)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight),
+        page: const LabelPrintScreen(),
+      ),
     ];
 
     return Scaffold(
@@ -7910,6 +8128,69 @@ class _AdminBannersTabState extends State<_AdminBannersTab> {
   }
 }
 
+// Retryable image cell — shows the failing URL and a retry button on error.
+class _BannerImageCell extends StatefulWidget {
+  final String imageUrl;
+  const _BannerImageCell({required this.imageUrl});
+
+  @override
+  State<_BannerImageCell> createState() => _BannerImageCellState();
+}
+
+class _BannerImageCellState extends State<_BannerImageCell> {
+  int _retryKey = 0;
+
+  Future<void> _retry() async {
+    await CachedNetworkImage.evictFromCache(widget.imageUrl);
+    if (mounted) setState(() => _retryKey++);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CachedNetworkImage(
+      key: ValueKey('${widget.imageUrl}_$_retryKey'),
+      imageUrl: widget.imageUrl,
+      height: 140,
+      width: double.infinity,
+      fit: BoxFit.cover,
+      placeholder: (_, __) => Container(
+          height: 140,
+          color: AppColors.border,
+          child: const Center(
+              child: CircularProgressIndicator(
+                  color: AppColors.primary, strokeWidth: 2))),
+      errorWidget: (_, __, ___) => GestureDetector(
+        onTap: _retry,
+        child: Container(
+          height: 140,
+          color: AppColors.border,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.broken_image_outlined,
+                  color: Colors.white54, size: 32),
+              const SizedBox(height: 6),
+              Text(
+                widget.imageUrl,
+                style: GoogleFonts.poppins(
+                    fontSize: 8, color: Colors.white38),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text('နှိပ်၍ ထပ်မံ ကြိုးစားပါ',
+                  style: GoogleFonts.poppins(
+                      fontSize: 9, color: AppColors.primary)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _BannerCard extends StatelessWidget {
   final BannerModel banner;
   final VoidCallback onEdit;
@@ -7938,23 +8219,7 @@ class _BannerCard extends StatelessWidget {
           ClipRRect(
             borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
             child: banner.imageUrl.isNotEmpty
-                ? CachedNetworkImage(
-                    imageUrl: UploadService.fixUrl(banner.imageUrl),
-                    height: 140,
-                    width: double.infinity,
-                    fit: BoxFit.cover,
-                    placeholder: (_, __) => Container(
-                        height: 140,
-                        color: AppColors.border,
-                        child: const Center(
-                            child: CircularProgressIndicator(
-                                color: AppColors.primary, strokeWidth: 2))),
-                    errorWidget: (_, __, ___) => Container(
-                        height: 140,
-                        color: AppColors.border,
-                        child: const Icon(Icons.broken_image_outlined,
-                            color: Colors.white54, size: 36)),
-                  )
+                ? _BannerImageCell(imageUrl: UploadService.fixUrl(banner.imageUrl))
                 : Container(
                     height: 140,
                     color: AppColors.border,

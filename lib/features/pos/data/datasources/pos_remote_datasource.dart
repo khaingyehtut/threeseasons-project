@@ -57,7 +57,7 @@ class PosRemoteDataSource {
     for (final item in refundItems) {
       final pid = item['productId'] as String?;
       final qty = (item['qty'] as num?)?.toInt() ?? 0;
-      if (pid != null && pid.isNotEmpty && qty > 0) {
+      if (pid != null && pid.isNotEmpty && !pid.startsWith('CUSTOM-') && qty > 0) {
         batch.update(_db.collection('products').doc(pid), {
           'stock': FieldValue.increment(qty),
           'sold': FieldValue.increment(-qty),

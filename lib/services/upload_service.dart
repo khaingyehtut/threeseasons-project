@@ -12,10 +12,13 @@ class UploadService {
   static String get _baseUrl => AppConstants.socketUrl;
 
   /// Rewrites any stored backend URL to point to the current server.
-  /// Handles IP changes — replaces http://OLD_IP:PORT with current _baseUrl.
+  /// Handles: relative paths (/productImages/...), IP changes, http/https.
   static String fixUrl(String url) {
     if (url.isEmpty) return url;
-    return url.replaceFirst(RegExp(r'http://[\d.]+:\d+'), _baseUrl);
+    // Relative path from server (e.g. "/productImages/x.jpg") → prepend base
+    if (url.startsWith('/')) return '$_baseUrl$url';
+    // Rewrite any stored host:port to the current server (handles IP changes)
+    return url.replaceFirst(RegExp(r'https?://[^/]+'), _baseUrl);
   }
 
   final Dio _dio = Dio(

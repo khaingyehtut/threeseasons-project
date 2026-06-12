@@ -1,11 +1,11 @@
 {
-    "name": "TSfootwear",
-    "short_name": "TSfootwear",
+    "name": "သုံးရာသီ",
+    "short_name": "သုံးရာသီ",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#ffffff",
     "theme_color": "#ffffff",
-    "description": "TSfootwear - Modern Footwear Shop",
+    "description": "သုံးရာသီ - Modern Footwear Shop",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

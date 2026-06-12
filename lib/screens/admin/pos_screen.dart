@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -17,6 +18,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 import 'package:go_router/go_router.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../controllers/auth_controller.dart';
@@ -29,6 +31,9 @@ import '../../models/category_model.dart';
 import '../../services/barcode_server_service.dart';
 import '../../services/bt_printer_service.dart';
 import '../../features/pos/data/repositories/pos_repository.dart';
+import 'admin_dashboard.dart'
+    show AdminOrdersPage, AdminChatPage, AdminPaymentsPage;
+import 'label_print_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POS Screen
@@ -168,19 +173,187 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
 
+  // ── Notification counts ──────────────────────────────────────────────────
+  int _pendingOrders = 0;
+  int _unreadMessages = 0;
+  int _pendingPayments = 0;
+  StreamSubscription<QuerySnapshot>? _ordersSub;
+  StreamSubscription<QuerySnapshot>? _paymentsSub;
+  StreamSubscription<QuerySnapshot>? _chatSub;
+  // Watches Firebase Auth so we set up the chat sub as soon as the session
+  // is confirmed (currentUser can be null briefly while Auth restores state).
+  StreamSubscription<User?>? _authSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscribeNotifications();
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    _ordersSub?.cancel();
+    _paymentsSub?.cancel();
+    _chatSub?.cancel();
+    super.dispose();
+  }
+
+  void _subscribeNotifications() {
+    final db = FirebaseFirestore.instance;
+
+    _ordersSub = db
+        .collection('orders')
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .listen((s) {
+      if (mounted) setState(() => _pendingOrders = s.docs.length);
+    });
+
+    _paymentsSub = db
+        .collection('payments')
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .listen((s) {
+      if (mounted) setState(() => _pendingPayments = s.docs.length);
+    });
+
+    // authStateChanges fires immediately with the current user (even if
+    // currentUser was null at initState time), then again on sign-in/out.
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((fbUser) {
+      _chatSub?.cancel();
+      _chatSub = null;
+      if (fbUser == null) {
+        if (mounted) setState(() => _unreadMessages = 0);
+        return;
+      }
+      final uid = fbUser.uid;
+      // Direct count: messages sent TO the admin that are still unread.
+      // Simpler and more reliable than reading the unreadCounts map on conversations.
+      _chatSub = db
+          .collectionGroup('messages')
+          .where('receiverId', isEqualTo: uid)
+          .where('isRead', isEqualTo: false)
+          .snapshots()
+          .listen((s) {
+        if (mounted) setState(() => _unreadMessages = s.docs.length);
+      }, onError: (_) {});
+    });
+  }
+
+  Widget _buildNotifFabs(BuildContext context) {
+    final fabs = <Widget>[];
+
+    void addFab({
+      required int count,
+      required IconData icon,
+      required Color color,
+      required Widget page,
+    }) {
+      if (count <= 0) return;
+      fabs.add(
+        GestureDetector(
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => page),
+          ),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.40),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Icon(icon, color: Colors.white, size: 22),
+              ),
+              Positioned(
+                top: -4,
+                right: -4,
+                child: Container(
+                  constraints: const BoxConstraints(minWidth: 18),
+                  height: 18,
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.secondary,
+                    borderRadius: BorderRadius.circular(9),
+                    border:
+                        Border.all(color: Colors.white, width: 1.5),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    count > 99 ? '99+' : '$count',
+                    style: GoogleFonts.poppins(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      fabs.add(const SizedBox(height: 10));
+    }
+
+    addFab(
+      count: _unreadMessages,
+      icon: Icons.chat_bubble_rounded,
+      color: const Color(0xFFFF9F43),
+      page: const AdminChatPage(),
+    );
+    addFab(
+      count: _pendingOrders,
+      icon: Icons.receipt_long_rounded,
+      color: const Color(0xFF3B82F6),
+      page: const AdminOrdersPage(),
+    );
+    addFab(
+      count: _pendingPayments,
+      icon: Icons.account_balance_wallet_rounded,
+      color: const Color(0xFF1DD1A1),
+      page: const AdminPaymentsPage(),
+    );
+
+    if (fabs.isEmpty) return const SizedBox.shrink();
+
+    return Positioned(
+      bottom: 16,
+      left: 16,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: fabs.reversed.toList(),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
     final w = MediaQuery.of(context).size.width;
     if (w >= 700) {
-      // Landscape / tablet: side-by-side layout.
-      // Cart width scales with screen: 30% clamped between 300–440 px.
       final cartW = (w * 0.30).clamp(300.0, 440.0);
-      return Row(
+      return Stack(
         children: [
-          Expanded(child: _ProductPanel(pos: widget.pos)),
-          Container(width: 1, color: AppColors.border),
-          SizedBox(width: cartW, child: _CartPanel(pos: widget.pos)),
+          Row(
+            children: [
+              Expanded(child: _ProductPanel(pos: widget.pos)),
+              Container(width: 1, color: AppColors.border),
+              SizedBox(width: cartW, child: _CartPanel(pos: widget.pos)),
+            ],
+          ),
+          _buildNotifFabs(context),
         ],
       );
     }
@@ -203,6 +376,7 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
                 ),
               )),
         ),
+        _buildNotifFabs(context),
       ],
     );
   }
@@ -219,7 +393,6 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => SizedBox(
-        // In landscape the screen is short — use 95% height so cart is usable.
         height: h * (isLandscape ? 0.95 : 0.85),
         child: _CartPanel(pos: pos),
       ),
@@ -432,6 +605,18 @@ class _ProductPanelState extends State<_ProductPanel> {
     });
   }
 
+  Future<void> _openCameraScanner() async {
+    final scanned = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const _BarcodeScanSheet(),
+    );
+    if (scanned != null && scanned.isNotEmpty && mounted) {
+      _onBarcodeSubmit(scanned);
+    }
+  }
+
   void _addProductToCart(ProductModel product) {
     widget.pos.addToCart(product);
     _beep.seek(Duration.zero).then((_) => _beep.resume());
@@ -500,6 +685,13 @@ class _ProductPanelState extends State<_ProductPanel> {
                 ),
               ),
               const SizedBox(width: 8),
+              if (MediaQuery.of(context).size.height < 700)
+                IconButton(
+                  onPressed: _openCameraScanner,
+                  icon: const Icon(Icons.qr_code_scanner_rounded),
+                  tooltip: 'ကင်မရာဖြင့် ဘားကုဒ် စကန်',
+                  color: AppColors.primary,
+                ),
               IconButton(
                 onPressed: _showCustomItemDialog,
                 icon: const Icon(Icons.add_box_rounded),
@@ -2346,9 +2538,11 @@ class _SalesHistoryTab extends StatefulWidget {
   State<_SalesHistoryTab> createState() => _SalesHistoryTabState();
 }
 
-class _SalesHistoryTabState extends State<_SalesHistoryTab> {
+class _SalesHistoryTabState extends State<_SalesHistoryTab>
+    with SingleTickerProviderStateMixin {
   final _searchCtrl = TextEditingController();
   String _query = '';
+  late TabController _phoneTabCtrl;
 
   // ── Chart state ───────────────────────────────────────────────────────────
   Map<DateTime, double> _chartData = {};
@@ -2359,6 +2553,7 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab> {
   @override
   void initState() {
     super.initState();
+    _phoneTabCtrl = TabController(length: 2, vsync: this);
     final now = DateTime.now();
     _chartTo = DateTime(now.year, now.month, now.day);
     _chartFrom = _chartTo.subtract(const Duration(days: 6));
@@ -2367,6 +2562,7 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab> {
 
   @override
   void dispose() {
+    _phoneTabCtrl.dispose();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -2778,226 +2974,249 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+  Widget _buildSalesList() {
+    return Column(
       children: [
-        // ── Left: Sales list ────────────────────────────────────────────────
-        Expanded(
-          flex: 55,
-          child: Column(
-            children: [
-              // Search bar
-              Container(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                color: AppColors.card,
-                child: TextField(
-                  controller: _searchCtrl,
-                  onChanged: (v) => setState(() => _query = v),
-                  style: GoogleFonts.poppins(
-                      fontSize: 14, color: AppColors.textPrimary),
-                  decoration: InputDecoration(
-                    hintText: 'ID၊ ကက်ရှယာ၊ ကုန်ပစ္စည်းဖြင့် ရှာမည်...',
-                    prefixIcon: const Icon(Icons.search_rounded, size: 20),
-                    suffixIcon: _query.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.close, size: 18),
-                            onPressed: () {
-                              _searchCtrl.clear();
-                              setState(() => _query = '');
-                            },
-                          )
-                        : null,
-                    filled: true,
-                    fillColor: AppColors.bg,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                  ),
-                ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          color: AppColors.card,
+          child: TextField(
+            controller: _searchCtrl,
+            onChanged: (v) => setState(() => _query = v),
+            style: GoogleFonts.poppins(
+                fontSize: 14, color: AppColors.textPrimary),
+            decoration: InputDecoration(
+              hintText: 'ID၊ ကက်ရှယာ၊ ကုန်ပစ္စည်းဖြင့် ရှာမည်...',
+              prefixIcon: const Icon(Icons.search_rounded, size: 20),
+              suffixIcon: _query.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () {
+                        _searchCtrl.clear();
+                        setState(() => _query = '');
+                      },
+                    )
+                  : null,
+              filled: true,
+              fillColor: AppColors.bg,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
               ),
-              Expanded(
-                child: Obx(() {
-                  if (widget.pos.isLoadingHistory.value) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (widget.pos.salesHistory.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.receipt_long_outlined,
-                              size: 56, color: AppColors.textLight),
-                          const SizedBox(height: 12),
-                          Text('ရောင်းချမှု မရှိသေးပါ',
-                              style: GoogleFonts.poppins(
-                                  fontSize: 16, color: AppColors.textMedium)),
-                        ],
-                      ),
-                    );
-                  }
-                  final list = _filtered(widget.pos.salesHistory);
-                  if (list.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.search_off_rounded,
-                              size: 56, color: AppColors.textLight),
-                          const SizedBox(height: 12),
-                          Text('"$_query" အတွက် ရလဒ် မတွေ့ပါ',
-                              style: GoogleFonts.poppins(
-                                  fontSize: 14, color: AppColors.textMedium)),
-                        ],
-                      ),
-                    );
-                  }
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: list.length,
-                    itemBuilder: (_, i) {
-                      final sale = list[i];
-                      final isRefund = sale.isRefundRecord;
-                      final isRefunded = sale.isRefunded;
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        color: AppColors.card,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 12),
-                          child: Row(
+            ),
+          ),
+        ),
+        Expanded(
+          child: Obx(() {
+            if (widget.pos.isLoadingHistory.value) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (widget.pos.salesHistory.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.receipt_long_outlined,
+                        size: 56, color: AppColors.textLight),
+                    const SizedBox(height: 12),
+                    Text('ရောင်းချမှု မရှိသေးပါ',
+                        style: GoogleFonts.poppins(
+                            fontSize: 16, color: AppColors.textMedium)),
+                  ],
+                ),
+              );
+            }
+            final list = _filtered(widget.pos.salesHistory);
+            if (list.isEmpty) {
+              return Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.search_off_rounded,
+                        size: 56, color: AppColors.textLight),
+                    const SizedBox(height: 12),
+                    Text('"$_query" အတွက် ရလဒ် မတွေ့ပါ',
+                        style: GoogleFonts.poppins(
+                            fontSize: 14, color: AppColors.textMedium)),
+                  ],
+                ),
+              );
+            }
+            return ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: list.length,
+              itemBuilder: (_, i) {
+                final sale = list[i];
+                final isRefund = sale.isRefundRecord;
+                final isRefunded = sale.isRefunded;
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  color: AppColors.card,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: isRefund
+                                ? AppColors.secondary.withValues(alpha: 0.12)
+                                : AppColors.primary.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            isRefund
+                                ? Icons.undo_rounded
+                                : Icons.receipt_rounded,
+                            color: isRefund
+                                ? AppColors.secondary
+                                : AppColors.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              // Icon
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: isRefund
-                                      ? AppColors.secondary
-                                          .withValues(alpha: 0.12)
-                                      : AppColors.primary
-                                          .withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Icon(
-                                  isRefund
-                                      ? Icons.undo_rounded
-                                      : Icons.receipt_rounded,
-                                  color: isRefund
-                                      ? AppColors.secondary
-                                      : AppColors.primary,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              // Info
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(children: [
-                                      Expanded(
-                                        child: Text(sale.id,
-                                            style: GoogleFonts.poppins(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.w600,
-                                                color: AppColors.textPrimary),
-                                            overflow: TextOverflow.ellipsis),
-                                      ),
-                                      if (isRefunded)
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 6, vertical: 2),
-                                          decoration: BoxDecoration(
-                                            color: AppColors.secondary
-                                                .withValues(alpha: 0.12),
-                                            borderRadius:
-                                                BorderRadius.circular(6),
-                                          ),
-                                          child: Text('ပြန်အမ်းပြီ',
-                                              style: GoogleFonts.poppins(
-                                                  fontSize: 9,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: AppColors.secondary)),
-                                        ),
-                                    ]),
-                                    Text(
-                                      '${sale.items.length} items • ${sale.paymentMethod.toUpperCase()} • ${sale.cashierName}${sale.staffName.isNotEmpty ? ' • Staff: ${sale.staffName}' : ''}',
+                              Row(children: [
+                                Expanded(
+                                  child: Text(sale.id,
                                       style: GoogleFonts.poppins(
-                                          fontSize: 11,
-                                          color: AppColors.textMedium),
-                                    ),
-                                    Text(
-                                      DateFormat('dd MMM yyyy, HH:mm')
-                                          .format(sale.createdAt),
-                                      style: GoogleFonts.poppins(
-                                          fontSize: 10,
-                                          color: AppColors.textLight),
-                                    ),
-                                  ],
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.textPrimary),
+                                      overflow: TextOverflow.ellipsis),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              // Amount + actions
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    fmtPrice(sale.total),
-                                    style: GoogleFonts.poppins(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w700,
-                                        color: isRefund
-                                            ? AppColors.secondary
-                                            : AppColors.primary),
+                                if (isRefunded)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: AppColors.secondary
+                                          .withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text('ပြန်အမ်းပြီ',
+                                        style: GoogleFonts.poppins(
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppColors.secondary)),
                                   ),
-                                  const SizedBox(height: 6),
-                                  Row(children: [
-                                    // Receipt
-                                    _HistoryActionBtn(
-                                      icon: Icons.print_rounded,
-                                      color: AppColors.primary,
-                                      tooltip: 'View receipt',
-                                      onTap: () => showDialog(
-                                        context: context,
-                                        builder: (_) =>
-                                            _ReceiptDialog(sale: sale),
-                                      ),
-                                    ),
-                                    // Refund (only for completed sales, not refunds)
-                                    if (!isRefund && !isRefunded) ...[
-                                      const SizedBox(width: 6),
-                                      _HistoryActionBtn(
-                                        icon: Icons.undo_rounded,
-                                        color: AppColors.secondary,
-                                        tooltip: 'ပြန်အမ်းရန်',
-                                        onTap: () => showDialog(
-                                          context: context,
-                                          builder: (_) => _RefundDialog(
-                                            sale: sale,
-                                            pos: widget.pos,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ]),
-                                ],
+                              ]),
+                              Text(
+                                '${sale.items.length} items • ${sale.paymentMethod.toUpperCase()} • ${sale.cashierName}${sale.staffName.isNotEmpty ? ' • Staff: ${sale.staffName}' : ''}',
+                                style: GoogleFonts.poppins(
+                                    fontSize: 11, color: AppColors.textMedium),
+                              ),
+                              Text(
+                                DateFormat('dd MMM yyyy, HH:mm')
+                                    .format(sale.createdAt),
+                                style: GoogleFonts.poppins(
+                                    fontSize: 10, color: AppColors.textLight),
                               ),
                             ],
                           ),
                         ),
-                      );
-                    },
-                  );
-                }),
-              ),
-            ],
-          ),
+                        const SizedBox(width: 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              fmtPrice(sale.total),
+                              style: GoogleFonts.poppins(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: isRefund
+                                      ? AppColors.secondary
+                                      : AppColors.primary),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(children: [
+                              _HistoryActionBtn(
+                                icon: Icons.print_rounded,
+                                color: AppColors.primary,
+                                tooltip: 'View receipt',
+                                onTap: () => showDialog(
+                                  context: context,
+                                  builder: (_) => _ReceiptDialog(sale: sale),
+                                ),
+                              ),
+                              if (!isRefund && !isRefunded) ...[
+                                const SizedBox(width: 6),
+                                _HistoryActionBtn(
+                                  icon: Icons.undo_rounded,
+                                  color: AppColors.secondary,
+                                  tooltip: 'ပြန်အမ်းရန်',
+                                  onTap: () => showDialog(
+                                    context: context,
+                                    builder: (_) => _RefundDialog(
+                                      sale: sale,
+                                      pos: widget.pos,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ]),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          }),
         ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final w = MediaQuery.of(context).size.width;
+
+    if (w < 700) {
+      return Column(
+        children: [
+          Container(
+            color: AppColors.card,
+            child: TabBar(
+              controller: _phoneTabCtrl,
+              labelColor: AppColors.primary,
+              unselectedLabelColor: AppColors.textMedium,
+              indicatorColor: AppColors.primary,
+              labelStyle: GoogleFonts.poppins(
+                  fontSize: 13, fontWeight: FontWeight.w600),
+              unselectedLabelStyle:
+                  GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w500),
+              tabs: const [
+                Tab(text: 'ရောင်းချမှု သမိုင်း'),
+                Tab(text: 'ယနေ့ ရောင်းချမှု'),
+              ],
+            ),
+          ),
+          Expanded(
+            child: TabBarView(
+              controller: _phoneTabCtrl,
+              children: [
+                _buildSalesList(),
+                Obx(() => _buildChartPanel()),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(flex: 55, child: _buildSalesList()),
         Container(width: 1, color: AppColors.border),
         Expanded(
           flex: 45,
@@ -3669,7 +3888,7 @@ class _PosDashboardTabState extends State<_PosDashboardTab> {
         colorA: const Color(0xFF1976D2),
         colorB: const Color(0xFF0D47A1),
         onTap: () => Navigator.push(
-            context, MaterialPageRoute(builder: (_) => const _HardwarePage())),
+            context, MaterialPageRoute(builder: (_) => const HardwarePage())),
       ),
       _DashCardData(
         icon: Icons.receipt_long_rounded,
@@ -3699,6 +3918,15 @@ class _PosDashboardTabState extends State<_PosDashboardTab> {
         colorB: const Color(0xFF4A148C),
         onTap: () => Navigator.push(context,
             MaterialPageRoute(builder: (_) => const _StaffManagementPage())),
+      ),
+      _DashCardData(
+        icon: Icons.label_rounded,
+        title: 'Label ရိုက်ရန်',
+        subtitle: 'ဂေါ်ပတ်ကပ် ဒီဇိုင်း & ပရင့်',
+        colorA: const Color(0xFF00B4D8),
+        colorB: const Color(0xFF0096C7),
+        onTap: () => Navigator.push(context,
+            MaterialPageRoute(builder: (_) => const LabelPrintScreen())),
       ),
       _DashCardData(
         icon: Icons.print_rounded,
@@ -4273,14 +4501,14 @@ class _LowStockPageState extends State<_LowStockPage> {
 // Hardware Page
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _HardwarePage extends StatefulWidget {
-  const _HardwarePage();
+class HardwarePage extends StatefulWidget {
+  const HardwarePage({super.key});
 
   @override
-  State<_HardwarePage> createState() => _HardwarePageState();
+  State<HardwarePage> createState() => _HardwarePageState();
 }
 
-class _HardwarePageState extends State<_HardwarePage> {
+class _HardwarePageState extends State<HardwarePage> {
   static const _kPaperWidth = 'pos_paper_width';
   int _paperWidth = 80;
 
@@ -4290,6 +4518,7 @@ class _HardwarePageState extends State<_HardwarePage> {
     SharedPreferences.getInstance().then((p) {
       if (mounted) setState(() => _paperWidth = p.getInt(_kPaperWidth) ?? 80);
     });
+    if (!kIsWeb) BtPrinterService.to.loadPairedDevices();
   }
 
   Future<void> _setPaper(int w) async {
@@ -4347,32 +4576,275 @@ class _HardwarePageState extends State<_HardwarePage> {
           const SizedBox(height: 14),
 
           // ── Bluetooth Printer ───────────────────────────────────────────
-          Obx(() {
-            final bt = BtPrinterService.to;
-            final connected = bt.isConnected.value;
-            final deviceName = bt.connectedDevice.value?.name ?? '';
-            return _SectionCard(
-              icon: Icons.bluetooth_rounded,
-              iconColor: const Color(0xFF2980B9),
-              title: 'ဘလူးတုသ် ပရင်တာ',
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(
-                  connected ? 'Connected: $deviceName' : 'Not connected',
-                  style: GoogleFonts.poppins(
-                      fontSize: 13,
+          _SectionCard(
+            icon: Icons.bluetooth_rounded,
+            iconColor: const Color(0xFF2980B9),
+            title: 'ဘလူးတုသ် ပရင်တာ',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Status banner
+                Obx(() {
+                  final bt = BtPrinterService.to;
+                  final connected = bt.isConnected.value;
+                  final name = bt.connectedDevice.value?.name ?? '';
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
                       color: connected
-                          ? const Color(0xFF27AE60)
-                          : AppColors.textMedium),
+                          ? const Color(0xFF27AE60).withValues(alpha: 0.08)
+                          : Colors.orange.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: connected
+                              ? const Color(0xFF27AE60).withValues(alpha: 0.5)
+                              : Colors.orange.withValues(alpha: 0.5)),
+                    ),
+                    child: Row(children: [
+                      Icon(
+                        connected
+                            ? Icons.bluetooth_connected_rounded
+                            : Icons.bluetooth_disabled_rounded,
+                        color: connected
+                            ? const Color(0xFF27AE60)
+                            : Colors.orange,
+                        size: 22,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              connected ? 'ချိတ်ဆက်ပြီး' : 'မချိတ်မိသေးဘူး',
+                              style: GoogleFonts.poppins(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: connected
+                                      ? const Color(0xFF27AE60)
+                                      : Colors.orange),
+                            ),
+                            if (name.isNotEmpty)
+                              Text(name,
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 11,
+                                      color: AppColors.textMedium)),
+                          ],
+                        ),
+                      ),
+                      if (connected)
+                        TextButton(
+                          onPressed: bt.disconnect,
+                          child: Text('ဖြတ်ရန်',
+                              style: GoogleFonts.poppins(
+                                  color: Colors.red, fontSize: 12)),
+                        ),
+                    ]),
+                  );
+                }),
+
+                const SizedBox(height: 12),
+
+                // Device list header + refresh
+                Row(children: [
+                  Text('Paired Devices',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary)),
+                  const Spacer(),
+                  Obx(() {
+                    final bt = BtPrinterService.to;
+                    return bt.isScanning.value
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : IconButton(
+                            onPressed: bt.loadPairedDevices,
+                            icon: const Icon(Icons.refresh_rounded),
+                            color: AppColors.primary,
+                            iconSize: 20,
+                            tooltip: 'ထပ်မံ ရှာရန်',
+                            constraints: const BoxConstraints(),
+                            padding: const EdgeInsets.all(4),
+                          );
+                  }),
+                ]),
+
+                const SizedBox(height: 6),
+
+                // Inline device list
+                Obx(() {
+                  final bt = BtPrinterService.to;
+                  if (bt.isScanning.value) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  if (bt.devices.isEmpty) {
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Column(children: [
+                        Icon(Icons.bluetooth_searching_rounded,
+                            color: AppColors.textLight, size: 30),
+                        const SizedBox(height: 6),
+                        Text('Paired ပရင်တာ မတွေ့ပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 12,
+                                color: AppColors.textMedium)),
+                        Text('Refresh နှိပ်ပါ သို့မဟုတ် အောက်ပါ အဆင့်များ လိုက်နာပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 11,
+                                color: AppColors.textLight)),
+                      ]),
+                    );
+                  }
+                  return Column(
+                    children: bt.devices.map((d) {
+                      final isThis =
+                          bt.connectedDevice.value?.address == d.address &&
+                              bt.isConnected.value;
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        decoration: BoxDecoration(
+                          color: isThis
+                              ? const Color(0xFF27AE60).withValues(alpha: 0.06)
+                              : AppColors.bg,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: isThis
+                                  ? const Color(0xFF27AE60)
+                                      .withValues(alpha: 0.4)
+                                  : AppColors.border),
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(
+                            isThis
+                                ? Icons.bluetooth_connected_rounded
+                                : Icons.print_rounded,
+                            color: isThis
+                                ? const Color(0xFF27AE60)
+                                : AppColors.textMedium,
+                            size: 20,
+                          ),
+                          title: Text(d.name,
+                              style: GoogleFonts.poppins(
+                                  fontSize: 13,
+                                  fontWeight: isThis
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
+                                  color: AppColors.textPrimary)),
+                          subtitle: Text(d.address,
+                              style: GoogleFonts.poppins(
+                                  fontSize: 10,
+                                  color: AppColors.textMedium)),
+                          trailing: isThis
+                              ? Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF27AE60)
+                                        .withValues(alpha: 0.12),
+                                    borderRadius:
+                                        BorderRadius.circular(6),
+                                  ),
+                                  child: Text('Connected',
+                                      style: GoogleFonts.poppins(
+                                          fontSize: 10,
+                                          color:
+                                              const Color(0xFF27AE60),
+                                          fontWeight:
+                                              FontWeight.w600)),
+                                )
+                              : Obx(() => bt.isConnecting.value
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2))
+                                  : ElevatedButton(
+                                      onPressed: () => bt.connect(d),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor:
+                                            AppColors.primary,
+                                        foregroundColor: Colors.white,
+                                        padding:
+                                            const EdgeInsets.symmetric(
+                                                horizontal: 12,
+                                                vertical: 6),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(
+                                                    8)),
+                                        minimumSize: Size.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize
+                                                .shrinkWrap,
+                                      ),
+                                      child: Text('ချိတ်ဆက်ရန်',
+                                          style: GoogleFonts.poppins(
+                                              fontSize: 11)),
+                                    )),
+                        ),
+                      );
+                    }).toList(),
+                  );
+                }),
+
+                const SizedBox(height: 12),
+
+                // Troubleshooting guide
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withValues(alpha: 0.07),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: Colors.amber.withValues(alpha: 0.35)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        const Icon(Icons.help_outline_rounded,
+                            size: 14, color: Colors.amber),
+                        const SizedBox(width: 6),
+                        Text('ချိတ်မရလျှင် ဤအဆင့်များ လိုက်နာပါ',
+                            style: GoogleFonts.poppins(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.amber)),
+                      ]),
+                      const SizedBox(height: 6),
+                      _StepRow(
+                          step: '1',
+                          text: 'ပရင်တာကို ဖွင့်ပါ (Power ON)'),
+                      _StepRow(
+                          step: '2',
+                          text:
+                              'ဖုန်း Settings → Bluetooth တွင် ပရင်တာကို Pair ဦးပါ'),
+                      _StepRow(
+                          step: '3',
+                          text:
+                              'ဤနေရာသို့ ပြန်လာပြီး Refresh (↻) နှိပ်ပါ'),
+                      _StepRow(
+                          step: '4',
+                          text:
+                              'စာရင်းမှ ပရင်တာ နာမည် ရွေးပြီး "ချိတ်ဆက်ရန်" နှိပ်ပါ'),
+                      _StepRow(
+                          step: '5',
+                          text:
+                              'ထပ်ချိတ်မရလျှင် ပရင်တာကို ပိတ်ပြီး ပြန်ဖွင့်ပါ'),
+                    ],
+                  ),
                 ),
-                trailing: TextButton(
-                  onPressed: () => _showBtDialog(context),
-                  child: Text(connected ? 'Manage' : 'ချိတ်ဆက်ရန်',
-                      style: GoogleFonts.poppins(color: AppColors.primary)),
-                ),
-              ),
-            );
-          }),
+              ],
+            ),
+          ),
           const SizedBox(height: 14),
 
           // ── Barcode Scanner ─────────────────────────────────────────────
@@ -4558,87 +5030,6 @@ class _HardwarePageState extends State<_HardwarePage> {
     );
   }
 
-  void _showBtDialog(BuildContext context) {
-    final bt = BtPrinterService.to;
-    if (!kIsWeb) bt.loadPairedDevices();
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: AppColors.card,
-        title: Text('ဘလူးတုသ် ပရင်တာ',
-            style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        content: SizedBox(
-          width: 320,
-          child: Obx(() {
-            final devices = bt.devices;
-            final isScanning = bt.isScanning.value;
-            if (isScanning) {
-              return const SizedBox(
-                  height: 80,
-                  child: Center(child: CircularProgressIndicator()));
-            }
-            if (devices.isEmpty) {
-              return Column(mainAxisSize: MainAxisSize.min, children: [
-                Text('ချိတ်ဆက်ထားသော ကိရိယာ မတွေ့ပါ',
-                    style: GoogleFonts.poppins(
-                        fontSize: 13, color: AppColors.textMedium)),
-                const SizedBox(height: 12),
-                ElevatedButton.icon(
-                  onPressed: bt.loadPairedDevices,
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('ထပ်မံ စကင်ရန်'),
-                ),
-              ]);
-            }
-            return ListView.builder(
-              shrinkWrap: true,
-              itemCount: devices.length,
-              itemBuilder: (_, i) {
-                final d = devices[i];
-                final isThis = bt.connectedDevice.value?.address == d.address &&
-                    bt.isConnected.value;
-                return ListTile(
-                  leading: Icon(
-                      isThis
-                          ? Icons.bluetooth_connected_rounded
-                          : Icons.bluetooth_rounded,
-                      color: isThis
-                          ? const Color(0xFF27AE60)
-                          : AppColors.textMedium),
-                  title: Text(d.name, style: GoogleFonts.poppins(fontSize: 13)),
-                  subtitle: Text(d.address,
-                      style: GoogleFonts.poppins(
-                          fontSize: 11, color: AppColors.textMedium)),
-                  trailing: isThis
-                      ? TextButton(
-                          onPressed: bt.disconnect,
-                          child: Text('ချိတ်ဆက်မှု ဖြတ်ရန်',
-                              style: GoogleFonts.poppins(
-                                  color: AppColors.secondary)))
-                      : Obx(() => bt.isConnecting.value
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : TextButton(
-                              onPressed: () => bt.connect(d),
-                              child: Text('ချိတ်ဆက်ရန်',
-                                  style: GoogleFonts.poppins(
-                                      color: AppColors.primary)))),
-                );
-              },
-            );
-          }),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('ပိတ်ရန်'))
-        ],
-      ),
-    );
-  }
 }
 
 class _ConnInfoBox extends StatelessWidget {
@@ -6479,4 +6870,147 @@ class _FilterChip extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Camera barcode scanner sheet ──────────────────────────────────────────────
+class _BarcodeScanSheet extends StatefulWidget {
+  const _BarcodeScanSheet();
+
+  @override
+  State<_BarcodeScanSheet> createState() => _BarcodeScanSheetState();
+}
+
+class _BarcodeScanSheetState extends State<_BarcodeScanSheet> {
+  final MobileScannerController _ctrl = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    facing: CameraFacing.back,
+  );
+  bool _scanned = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_scanned) return;
+    final value = capture.barcodes.firstOrNull?.rawValue;
+    if (value == null || value.isEmpty) return;
+    _scanned = true;
+    Navigator.pop(context, value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    return Container(
+      height: size.height * 0.65,
+      decoration: const BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Column(
+        children: [
+          // Handle + header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 0),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(right: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    'ဘားကုဒ် စကန်ဖတ်ရန်',
+                    style: GoogleFonts.poppins(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          ),
+          // Camera preview with viewfinder overlay
+          Expanded(
+            child: Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                      bottom: Radius.circular(20)),
+                  child: MobileScanner(
+                    controller: _ctrl,
+                    onDetect: _onDetect,
+                  ),
+                ),
+                // Dimmed overlay with a transparent scan window
+                IgnorePointer(
+                  child: CustomPaint(
+                    size: Size.infinite,
+                    painter: _ScanOverlayPainter(),
+                  ),
+                ),
+                // Corner frame
+                Center(
+                  child: Container(
+                    width: 220,
+                    height: 120,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: AppColors.primary, width: 2.5),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+                // Hint text
+                Positioned(
+                  bottom: 24,
+                  left: 0,
+                  right: 0,
+                  child: Text(
+                    'ဘားကုဒ်ကို အကွက်အတွင်း ထားပါ',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.poppins(
+                        color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScanOverlayPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    const holeW = 220.0;
+    const holeH = 120.0;
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final hole = Rect.fromCenter(
+        center: Offset(cx, cy), width: holeW, height: holeH);
+
+    final paint = Paint()..color = Colors.black.withValues(alpha: 0.55);
+    final full = Path()..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
+    final cutout = Path()
+      ..addRRect(RRect.fromRectAndRadius(hole, const Radius.circular(12)));
+    canvas.drawPath(
+        Path.combine(PathOperation.difference, full, cutout), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter old) => false;
 }

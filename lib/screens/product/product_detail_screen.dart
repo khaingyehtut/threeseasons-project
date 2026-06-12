@@ -1438,10 +1438,17 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Text('💬', style: TextStyle(fontSize: 18)),
+                          Image.asset(
+                            'assets/icons/viber_logo.PNG',
+                            width: 22,
+                            height: 22,
+                            errorBuilder: (_, __, ___) =>
+                                const Icon(Icons.chat_bubble_rounded,
+                                    color: Colors.white, size: 20),
+                          ),
                           const SizedBox(width: 8),
                           Text(
-                            'Order via Viber',
+                            'Viber မှ မှာရန်',
                             style: GoogleFonts.poppins(
                               color: Colors.white,
                               fontSize: 13,
@@ -1481,10 +1488,17 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Text('🎵', style: TextStyle(fontSize: 18)),
+                          Image.asset(
+                            'assets/icons/tiktok_logo.PNG',
+                            width: 22,
+                            height: 22,
+                            errorBuilder: (_, __, ___) =>
+                                const Icon(Icons.music_note_rounded,
+                                    color: Colors.white, size: 20),
+                          ),
                           const SizedBox(width: 8),
                           Text(
-                            'Order via TikTok',
+                            'TikTok မှ မှာရန်',
                             style: GoogleFonts.poppins(
                               color: Colors.white,
                               fontSize: 13,
