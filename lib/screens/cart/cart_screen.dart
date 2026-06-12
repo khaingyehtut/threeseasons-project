@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -163,34 +164,38 @@ class _CartScreenState extends State<CartScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isLoggedIn = Get.find<AuthController>().isLoggedIn;
-    if (!isLoggedIn) {
+    return Obx(() {
+      final auth = Get.find<AuthController>();
+      final isLoggedIn =
+          auth.isLoggedIn || FirebaseAuth.instance.currentUser != null;
+      if (!isLoggedIn) {
+        return Scaffold(
+          backgroundColor: AppColors.bg,
+          appBar: _buildAppBar(),
+          body: LoginRequired(
+            title: 'cart_awaits'.tr,
+            subtitle: 'cart_login_sub'.tr,
+            icon: Icons.shopping_cart_outlined,
+          ),
+        );
+      }
       return Scaffold(
         backgroundColor: AppColors.bg,
         appBar: _buildAppBar(),
-        body: LoginRequired(
-          title: 'cart_awaits'.tr,
-          subtitle: 'cart_login_sub'.tr,
-          icon: Icons.shopping_cart_outlined,
-        ),
+        body: Obx(() {
+          final cartProvider = Get.find<CartController>();
+          if (cartProvider.isLoading.value && cartProvider.items.isEmpty) {
+            return const Center(
+              child: CircularProgressIndicator(color: AppColors.primary),
+            );
+          }
+          if (cartProvider.isEmpty) {
+            return _buildEmptyCart();
+          }
+          return _buildCartContent(cartProvider);
+        }),
       );
-    }
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: _buildAppBar(),
-      body: Obx(() {
-        final cartProvider = Get.find<CartController>();
-        if (cartProvider.isLoading.value && cartProvider.items.isEmpty) {
-          return const Center(
-            child: CircularProgressIndicator(color: AppColors.primary),
-          );
-        }
-        if (cartProvider.isEmpty) {
-          return _buildEmptyCart();
-        }
-        return _buildCartContent(cartProvider);
-      }),
-    );
+    });
   }
 
   PreferredSizeWidget _buildAppBar() {

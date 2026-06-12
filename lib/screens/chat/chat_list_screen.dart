@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:get/get.dart';
@@ -57,39 +58,43 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isLoggedIn = Get.find<AuthController>().isLoggedIn;
-    if (!isLoggedIn) {
+    return Obx(() {
+      final auth = Get.find<AuthController>();
+      final isLoggedIn =
+          auth.isLoggedIn || FirebaseAuth.instance.currentUser != null;
+      if (!isLoggedIn) {
+        return Scaffold(
+          backgroundColor: AppColors.bg,
+          appBar: _buildAppBar(context),
+          body: LoginRequired(
+            title: 'chat_support'.tr,
+            subtitle: 'login_to_message'.tr,
+            icon: Icons.chat_bubble_outline_rounded,
+          ),
+        );
+      }
       return Scaffold(
         backgroundColor: AppColors.bg,
         appBar: _buildAppBar(context),
-        body: LoginRequired(
-          title: 'chat_support'.tr,
-          subtitle: 'login_to_message'.tr,
-          icon: Icons.chat_bubble_outline_rounded,
-        ),
-      );
-    }
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: _buildAppBar(context),
-      body: Obx(() {
-        final chatController = Get.find<ChatController>();
-        if (chatController.isLoading.value &&
-            chatController.conversations.isEmpty &&
-            chatController.admins.isEmpty) {
-          return _buildShimmerLoader();
-        }
+        body: Obx(() {
+          final chatController = Get.find<ChatController>();
+          if (chatController.isLoading.value &&
+              chatController.conversations.isEmpty &&
+              chatController.admins.isEmpty) {
+            return _buildShimmerLoader();
+          }
 
-        return RefreshIndicator(
-          onRefresh: _onRefresh,
-          color: AppColors.primary,
-          backgroundColor: AppColors.card,
-          child: chatController.conversations.isEmpty
-              ? _buildEmptyState(chatController)
-              : _buildConversationsList(chatController),
-        );
-      }),
-    );
+          return RefreshIndicator(
+            onRefresh: _onRefresh,
+            color: AppColors.primary,
+            backgroundColor: AppColors.card,
+            child: chatController.conversations.isEmpty
+                ? _buildEmptyState(chatController)
+                : _buildConversationsList(chatController),
+          );
+        }),
+      );
+    });
   }
 
   AppBar _buildAppBar(BuildContext context) {

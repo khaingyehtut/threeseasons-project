@@ -92,7 +92,7 @@ class ThreeSeasonsApp extends StatelessWidget {
     // theme or locale changes — the most reliable way to trigger theme rebuilds.
     return GetBuilder<LocaleController>(
       builder: (ctrl) => GetMaterialApp.router(
-        title: 'သုံးရာသီ',
+        title: '54သုံးရာသီ',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.lightTheme,
         darkTheme: AppTheme.darkTheme,

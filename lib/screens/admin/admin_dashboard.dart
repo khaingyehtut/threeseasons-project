@@ -3728,22 +3728,47 @@ class _AdminOrdersTabState extends State<_AdminOrdersTab> {
       return const _EmptyState(
           icon: Icons.receipt_long_outlined, label: 'မှာယူမှု မတွေ့ပါ');
     }
-    return RefreshIndicator(
-      onRefresh: () async => _subscribe(),
-      color: AppColors.primary,
-      backgroundColor: AppColors.card,
-      child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-        itemCount: _filtered.length,
-        itemBuilder: (_, i) => _OrderAdminCard(
-          order: _filtered[i],
-          statuses: _statuses.where((s) => s != 'all').toList(),
-          onStatusChanged: (v) => _updateStatus(_filtered[i], v),
-          onTap: () => _showOrderDetail(context, _filtered[i]),
-          onDelete: () => _deleteOrder(_filtered[i]),
-        ),
-      ),
-    );
+    return LayoutBuilder(builder: (ctx, constraints) {
+      final isTablet = constraints.maxWidth >= 700;
+      final statuses = _statuses.where((s) => s != 'all').toList();
+      Widget cardFor(int i) => _OrderAdminCard(
+            order: _filtered[i],
+            statuses: statuses,
+            onStatusChanged: (v) => _updateStatus(_filtered[i], v),
+            onTap: () => _showOrderDetail(context, _filtered[i]),
+            onDelete: () => _deleteOrder(_filtered[i]),
+          );
+      return RefreshIndicator(
+        onRefresh: () async => _subscribe(),
+        color: AppColors.primary,
+        backgroundColor: AppColors.card,
+        child: isTablet
+            ? ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                itemCount: (_filtered.length / 2).ceil(),
+                itemBuilder: (_, i) {
+                  final right = i * 2 + 1;
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: cardFor(i * 2)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: right < _filtered.length
+                            ? cardFor(right)
+                            : const SizedBox(),
+                      ),
+                    ],
+                  );
+                },
+              )
+            : ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                itemCount: _filtered.length,
+                itemBuilder: (_, i) => cardFor(i),
+              ),
+      );
+    });
   }
 
   void _showOrderDetail(BuildContext context, OrderModel order) {
@@ -3813,6 +3838,10 @@ class _OrderAdminCard extends StatelessWidget {
             ),
             _StatusChip(status: order.status),
           ]),
+          if (order.items.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _buildItemsStrip(),
+          ],
           if (order.createdAt != null) ...[
             const SizedBox(height: 6),
             Text(
@@ -3885,6 +3914,123 @@ class _OrderAdminCard extends StatelessWidget {
             ],
           ]),
         ]),
+      ),
+    );
+  }
+
+  Widget _buildItemsStrip() {
+    const maxVisible = 4;
+    final visible = order.items.take(maxVisible).toList();
+    final extra = order.items.length - maxVisible;
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ...visible.map((item) => Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _OrderItemThumb(item: item),
+              )),
+          if (extra > 0)
+            Container(
+              width: 60,
+              height: 60,
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.border),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                '+$extra',
+                style: GoogleFonts.poppins(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OrderItemThumb extends StatelessWidget {
+  final OrderItemModel item;
+  const _OrderItemThumb({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: item.image.isNotEmpty
+              ? CachedNetworkImage(
+                  imageUrl: item.image,
+                  width: 60,
+                  height: 60,
+                  fit: BoxFit.cover,
+                  placeholder: (_, __) => _thumbPlaceholder(),
+                  errorWidget: (_, __, ___) => _thumbPlaceholder(),
+                )
+              : _thumbPlaceholder(),
+        ),
+        const SizedBox(height: 4),
+        SizedBox(
+          width: 60,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (item.size.isNotEmpty)
+                _OrderItemLabel(label: 'Sz ${item.size}', color: AppColors.primary),
+              if (item.color.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                _OrderItemLabel(label: item.color, color: AppColors.accent),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _thumbPlaceholder() => Container(
+        width: 60,
+        height: 60,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          border: Border.all(color: AppColors.border),
+        ),
+        child: const Icon(Icons.image_outlined,
+            color: AppColors.textLight, size: 22),
+      );
+}
+
+class _OrderItemLabel extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _OrderItemLabel({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 60,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.poppins(
+            color: color, fontSize: 9, fontWeight: FontWeight.w500),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
       ),
     );
   }
