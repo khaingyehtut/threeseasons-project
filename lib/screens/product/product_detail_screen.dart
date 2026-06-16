@@ -1,3 +1,4 @@
+import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -491,37 +492,57 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       height: height,
       child: Stack(
         children: [
+          Positioned.fill(child: Container(color: AppColors.card)),
           PageView.builder(
             controller: _pageController,
             itemCount: images.length,
             onPageChanged: (i) => setState(() => _currentImageIndex = i),
             itemBuilder: (context, index) {
               final img = images[index];
-              return img.isEmpty
-                  ? Container(
+              if (img.isEmpty) {
+                return Container(
+                  color: AppColors.card,
+                  child: const Center(
+                    child: Icon(Icons.image_not_supported_outlined,
+                        color: AppColors.textMedium, size: 60),
+                  ),
+                );
+              }
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  // Blurred background
+                  CachedNetworkImage(
+                    imageUrl: img,
+                    fit: BoxFit.cover,
+                    placeholder: (_, __) => Container(color: AppColors.card),
+                    errorWidget: (_, __, ___) =>
+                        Container(color: AppColors.card),
+                  ),
+                  BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                    child: const ColoredBox(color: Colors.transparent),
+                  ),
+                  // Clear image on top
+                  CachedNetworkImage(
+                    imageUrl: img,
+                    fit: BoxFit.contain,
+                    placeholder: (_, __) => Container(
+                      color: Colors.transparent,
+                      child: const Center(
+                          child: CircularProgressIndicator(
+                              color: AppColors.primary)),
+                    ),
+                    errorWidget: (_, __, ___) => Container(
                       color: AppColors.card,
                       child: const Center(
-                        child: Icon(Icons.image_not_supported_outlined,
+                        child: Icon(Icons.broken_image_outlined,
                             color: AppColors.textMedium, size: 60),
                       ),
-                    )
-                  : CachedNetworkImage(
-                      imageUrl: img,
-                      fit: BoxFit.cover,
-                      placeholder: (_, __) => Container(
-                        color: AppColors.card,
-                        child: const Center(
-                            child: CircularProgressIndicator(
-                                color: AppColors.primary)),
-                      ),
-                      errorWidget: (_, __, ___) => Container(
-                        color: AppColors.card,
-                        child: const Center(
-                          child: Icon(Icons.broken_image_outlined,
-                              color: AppColors.textMedium, size: 60),
-                        ),
-                      ),
-                    );
+                    ),
+                  ),
+                ],
+              );
             },
           ),
           // Gradient overlay at bottom

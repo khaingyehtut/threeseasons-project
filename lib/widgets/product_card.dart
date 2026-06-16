@@ -1,3 +1,4 @@
+import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -49,24 +50,43 @@ class ProductCard extends StatelessWidget {
                 ClipRRect(
                   borderRadius:
                       const BorderRadius.vertical(top: Radius.circular(16)),
-                  child: product.firstImage.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: product.firstImage,
-                          height: imageHeight,
-                          width: double.infinity,
-                          fit: BoxFit.cover,
-                          placeholder: (context, url) => _ShimmerBox(
-                            height: imageHeight,
-                            width: double.infinity,
-                            borderRadius: const BorderRadius.vertical(
-                              top: Radius.circular(16),
-                            ),
-                          ),
-                          errorWidget: (context, url, error) => _ImageFallback(
-                            height: imageHeight,
-                          ),
-                        )
-                      : _ImageFallback(height: imageHeight),
+                  child: SizedBox(
+                    height: imageHeight,
+                    width: double.infinity,
+                    child: product.firstImage.isNotEmpty
+                        ? Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              // Blurred background layer
+                              CachedNetworkImage(
+                                imageUrl: product.firstImage,
+                                fit: BoxFit.cover,
+                                placeholder: (context, url) => _ShimmerBox(
+                                  height: imageHeight,
+                                  width: double.infinity,
+                                  borderRadius: const BorderRadius.vertical(
+                                    top: Radius.circular(16),
+                                  ),
+                                ),
+                                errorWidget: (context, url, error) =>
+                                    _ImageFallback(height: imageHeight),
+                              ),
+                              BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                                child: const ColoredBox(
+                                    color: Colors.transparent),
+                              ),
+                              // Clear image on top
+                              CachedNetworkImage(
+                                imageUrl: product.firstImage,
+                                fit: BoxFit.contain,
+                                errorWidget: (context, url, error) =>
+                                    _ImageFallback(height: imageHeight),
+                              ),
+                            ],
+                          )
+                        : _ImageFallback(height: imageHeight),
+                  ),
                 ),
                 if (product.hasDiscount)
                   Positioned(

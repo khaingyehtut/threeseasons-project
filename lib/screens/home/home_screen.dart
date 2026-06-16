@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ImageFilter;
 import 'package:flutter/foundation.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_in_app_messaging/firebase_in_app_messaging.dart';
@@ -1180,11 +1181,25 @@ class _DynamicBannerCard extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
+          // Blurred background layer
           CachedNetworkImage(
             imageUrl: UploadService.fixUrl(banner.imageUrl),
             fit: BoxFit.cover,
+            placeholder: (_, __) => Container(color: AppColors.border),
+            errorWidget: (_, __, ___) => Container(
+              decoration: const BoxDecoration(gradient: AppColors.gradient1),
+            ),
+          ),
+          BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: const ColoredBox(color: Colors.transparent),
+          ),
+          // Clear image on top
+          CachedNetworkImage(
+            imageUrl: UploadService.fixUrl(banner.imageUrl),
+            fit: BoxFit.contain,
             placeholder: (_, __) => Container(
-              color: AppColors.border,
+              color: Colors.transparent,
               child: const Center(
                   child: CircularProgressIndicator(
                       color: AppColors.primary, strokeWidth: 2)),
