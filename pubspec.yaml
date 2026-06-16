@@ -111,3 +111,4 @@ flutter:
     - assets/fonts/
     - assets/icons/
     - assets/sounds/
+    - shorebird.yaml

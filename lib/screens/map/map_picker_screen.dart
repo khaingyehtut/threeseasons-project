@@ -142,7 +142,7 @@ class _MapPickerScreenState extends State<MapPickerScreen> {
             ],
           ),
         );
-        if (open == true) await Geolocator.openLocationSettings();
+        if (open == true && !kIsWeb) await Geolocator.openLocationSettings();
         return;
       }
 
@@ -189,7 +189,7 @@ class _MapPickerScreenState extends State<MapPickerScreen> {
             ],
           ),
         );
-        if (open == true) await Geolocator.openAppSettings();
+        if (open == true && !kIsWeb) await Geolocator.openAppSettings();
         return;
       }
 

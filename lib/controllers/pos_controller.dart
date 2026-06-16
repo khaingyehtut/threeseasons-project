@@ -52,14 +52,12 @@ class PosController extends GetxController {
 
   double get total => (subtotal - discountValue).clamp(0, double.infinity);
 
-  double get change =>
-      paymentMethod.value == 'cash'
-          ? (cashGiven.value - total).clamp(0, double.infinity)
-          : 0;
+  double get change => paymentMethod.value == 'cash'
+      ? (cashGiven.value - total).clamp(0, double.infinity)
+      : 0;
 
   bool get canCharge =>
-      total > 0 &&
-      (paymentMethod.value != 'cash' || cashGiven.value >= total);
+      total > 0 && (paymentMethod.value != 'cash' || cashGiven.value >= total);
 
   int get cartCount => cartItems.fold(0, (acc, i) => acc + i.qty);
 
@@ -73,7 +71,8 @@ class PosController extends GetxController {
       cartItems[idx].qty++;
       cartItems.refresh();
     } else {
-      cartItems.add(PosCartItem(product: product, qty: 1, size: size, color: color));
+      cartItems
+          .add(PosCartItem(product: product, qty: 1, size: size, color: color));
     }
   }
 
@@ -192,32 +191,34 @@ class PosController extends GetxController {
 
   // ── Refund ─────────────────────────────────────────────────────────────────
 
-  Future<String?> processRefund(
+  /// Fire-and-forget refund: optimistically marks the sale in the local list,
+  /// writes to Firestore in the background, then reconciles from the server.
+  void queueRefund(
     PosSaleModel sale,
     List<Map<String, dynamic>> refundItems,
-  ) async {
-    isProcessing.value = true;
-    try {
-      final refundId = await _repo.saveRefund(
-        originalSale: sale,
-        refundItems: refundItems,
-      );
-      await fetchSalesHistory();
-      return refundId;
-    } catch (e) {
-      lastError.value = 'Refund failed: $e';
-      return null;
-    } finally {
-      isProcessing.value = false;
+  ) {
+    // Optimistic update: mark as refunded immediately
+    final idx = salesHistory.indexWhere((s) => s.id == sale.id);
+    if (idx >= 0) {
+      salesHistory[idx] = salesHistory[idx].copyWith(status: 'refunded');
+      salesHistory.refresh();
     }
+    _repo
+        .saveRefund(originalSale: sale, refundItems: refundItems)
+        .then((_) => fetchSalesHistory())
+        .catchError((e) {
+      lastError.value = 'Refund failed: $e';
+      fetchSalesHistory(); // revert optimistic update
+    });
   }
 
   // ── Sales History ──────────────────────────────────────────────────────────
 
-  Future<void> fetchSalesHistory() async {
+  Future<void> fetchSalesHistory({DateTime? date}) async {
     isLoadingHistory.value = true;
     try {
-      salesHistory.value = await _repo.getSalesHistory();
+      final day = date ?? DateTime.now();
+      salesHistory.value = await _repo.getSalesHistoryForDate(day);
     } catch (_) {
     } finally {
       isLoadingHistory.value = false;
@@ -260,7 +261,8 @@ class PosController extends GetxController {
               'originalPrice': i.product.originalPrice,
             if (i.product.originalPrice != null)
               'itemProfit':
-                  (i.product.discountedPrice - i.product.originalPrice!) * i.qty,
+                  (i.product.discountedPrice - i.product.originalPrice!) *
+                      i.qty,
           })
       .toList();
 

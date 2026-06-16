@@ -44,6 +44,7 @@ class PosRemoteDataSource {
       'id': refundId,
       'originalSaleId': originalSale.id,
       'type': 'refund',
+      'paymentMethod': originalSale.paymentMethod,
       'items': refundItems,
       'total': refundTotal,
       'totalProfit': refundProfit,
@@ -73,6 +74,20 @@ class PosRemoteDataSource {
         .collection('pos_sales')
         .orderBy('createdAt', descending: true)
         .limit(limit)
+        .get();
+    return snap.docs
+        .map((d) => PosSaleModel.fromJson({...d.data(), 'id': d.id}))
+        .toList();
+  }
+
+  Future<List<PosSaleModel>> getSalesHistoryForDate(DateTime date) async {
+    final start = DateTime(date.year, date.month, date.day);
+    final end = start.add(const Duration(days: 1));
+    final snap = await _db
+        .collection('pos_sales')
+        .orderBy('createdAt', descending: true)
+        .where('createdAt', isGreaterThanOrEqualTo: start.toIso8601String())
+        .where('createdAt', isLessThan: end.toIso8601String())
         .get();
     return snap.docs
         .map((d) => PosSaleModel.fromJson({...d.data(), 'id': d.id}))

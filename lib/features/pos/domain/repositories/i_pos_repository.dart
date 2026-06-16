@@ -18,6 +18,9 @@ abstract class IPosRepository {
   /// Loads the most recent [limit] sales from Firestore.
   Future<List<PosSaleModel>> getSalesHistory({int limit = 50});
 
+  /// Loads all sales (and refunds) for a specific calendar day.
+  Future<List<PosSaleModel>> getSalesHistoryForDate(DateTime date);
+
   /// Number of sales waiting to be synced to Firestore.
   int get pendingCount;
 

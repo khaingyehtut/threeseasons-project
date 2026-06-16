@@ -103,6 +103,10 @@ class PosRepository extends GetxController implements IPosRepository {
       _remote.getSalesHistory(limit: limit);
 
   @override
+  Future<List<PosSaleModel>> getSalesHistoryForDate(DateTime date) =>
+      _remote.getSalesHistoryForDate(date);
+
+  @override
   Future<int> syncPending() async {
     if (kIsWeb || isSyncing.value || !isOnline) return pendingCountObs.value;
 

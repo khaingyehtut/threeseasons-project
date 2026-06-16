@@ -81,6 +81,25 @@ class PosSaleModel {
   bool get isRefundRecord => type == 'refund';
   bool get isRefunded => status == 'refunded';
 
+  PosSaleModel copyWith({String? status, String? refundId}) => PosSaleModel(
+        id: id,
+        items: items,
+        subtotal: subtotal,
+        discount: discount,
+        total: total,
+        paymentMethod: paymentMethod,
+        cashGiven: cashGiven,
+        change: change,
+        cashierName: cashierName,
+        createdAt: createdAt,
+        status: status ?? this.status,
+        type: type,
+        originalSaleId: originalSaleId,
+        totalCost: totalCost,
+        totalProfit: totalProfit,
+        staffName: staffName,
+      );
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'items': items,

@@ -55,7 +55,7 @@ class _PosScreenState extends State<PosScreen>
   void initState() {
     super.initState();
     _pos = Get.put(PosController());
-    _tabCtrl = TabController(length: 3, vsync: this);
+    _tabCtrl = TabController(length: 4, vsync: this);
     _tabCtrl.addListener(() {
       if (_tabCtrl.index == 1) _pos.fetchSalesHistory();
     });
@@ -136,8 +136,9 @@ class _PosScreenState extends State<PosScreen>
                 GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 13),
             tabs: const [
               Tab(icon: Icon(Icons.point_of_sale_rounded), text: 'POS'),
-              Tab(icon: Icon(Icons.history_rounded), text: 'Sales History'),
+              Tab(icon: Icon(Icons.history_rounded), text: 'အရောင်းမှတ်တမ်း'),
               Tab(icon: Icon(Icons.dashboard_rounded), text: 'Dashboard'),
+              Tab(icon: Icon(Icons.receipt_long_rounded), text: 'ကုန်ကျစရိတ်'),
             ],
           ),
         ),
@@ -149,6 +150,7 @@ class _PosScreenState extends State<PosScreen>
               _PosTab(pos: _pos),
               _SalesHistoryTab(pos: _pos),
               _PosDashboardTab(pos: _pos),
+              const _ExpensesTab(),
             ],
           ),
         ),
@@ -286,8 +288,7 @@ class _PosTabState extends State<_PosTab> with AutomaticKeepAliveClientMixin {
                   decoration: BoxDecoration(
                     color: AppColors.secondary,
                     borderRadius: BorderRadius.circular(9),
-                    border:
-                        Border.all(color: Colors.white, width: 1.5),
+                    border: Border.all(color: Colors.white, width: 1.5),
                   ),
                   alignment: Alignment.center,
                   child: Text(
@@ -518,7 +519,8 @@ class _ProductPanelState extends State<_ProductPanel> {
           _categories = snap.docs
               .map((d) =>
                   CategoryModel.fromJson({...d.data() as Map, 'id': d.id}))
-              .toList();
+              .toList()
+            ..sort((a, b) => a.name.compareTo(b.name));
         });
       }
     } catch (_) {}
@@ -589,7 +591,7 @@ class _ProductPanelState extends State<_ProductPanel> {
           _products.where((p) => p.barcode.trim() == trimmed).toList();
       if (exact.isNotEmpty) {
         // Match — add to cart + beep + clear bar
-        _addProductToCart(exact.first);
+        _addProductToCart(exact.first, Offset.zero, exact.first.firstImage);
         _searchCtrl.clear();
       } else {
         // No match — error sound, keep barcode in bar
@@ -617,9 +619,33 @@ class _ProductPanelState extends State<_ProductPanel> {
     }
   }
 
-  void _addProductToCart(ProductModel product) {
+  void _addProductToCart(
+      ProductModel product, Offset cardCenter, String imageUrl) {
     widget.pos.addToCart(product);
     _beep.seek(Duration.zero).then((_) => _beep.resume());
+    _flyToCart(cardCenter, imageUrl);
+  }
+
+  void _flyToCart(Offset start, String imageUrl) {
+    if (start == Offset.zero) return; // barcode scan — no card position
+    final overlay = Overlay.of(context);
+    final size = MediaQuery.of(context).size;
+    final isTablet = size.width >= 700;
+    final cartW = isTablet ? (size.width * 0.30).clamp(300.0, 440.0) : 0.0;
+    final target = isTablet
+        ? Offset(size.width - cartW / 2, size.height * 0.22)
+        : Offset(size.width - 56, size.height - 60);
+
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _FlyToCartWidget(
+        imageUrl: imageUrl,
+        start: start,
+        end: target,
+        onDone: () => entry.remove(),
+      ),
+    );
+    overlay.insert(entry);
   }
 
   Future<void> _showCustomItemDialog() async {
@@ -760,7 +786,8 @@ class _ProductPanelState extends State<_ProductPanel> {
                       itemCount: _filtered.length,
                       itemBuilder: (_, i) => _ProductCard(
                         product: _filtered[i],
-                        onTap: () => _addProductToCart(_filtered[i]),
+                        onTap: (center, img) =>
+                            _addProductToCart(_filtered[i], center, img),
                       ),
                     ),
         ),
@@ -932,101 +959,176 @@ class _CatChip extends StatelessWidget {
 // Product Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _ProductCard extends StatelessWidget {
+class _ProductCard extends StatefulWidget {
   final ProductModel product;
-  final VoidCallback onTap;
+  final Function(Offset center, String imageUrl) onTap;
   const _ProductCard({required this.product, required this.onTap});
 
   @override
+  State<_ProductCard> createState() => _ProductCardState();
+}
+
+class _ProductCardState extends State<_ProductCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+  late final Animation<double> _checkOpacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 380));
+    _scale = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.10), weight: 30),
+      TweenSequenceItem(tween: Tween(begin: 1.10, end: 0.94), weight: 35),
+      TweenSequenceItem(tween: Tween(begin: 0.94, end: 1.0), weight: 35),
+    ]).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+    _checkOpacity = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 0.0, end: 1.0), weight: 20),
+      TweenSequenceItem(tween: ConstantTween(1.0), weight: 50),
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.0), weight: 30),
+    ]).animate(_ctrl);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _handleTap() {
+    _ctrl.forward(from: 0);
+    final box = context.findRenderObject() as RenderBox?;
+    final center = box == null
+        ? Offset.zero
+        : box.localToGlobal(Offset(box.size.width / 2, box.size.height / 2));
+    widget.onTap(center, widget.product.firstImage);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final outOfStock = product.stock <= 0;
+    final outOfStock = widget.product.stock <= 0;
     return GestureDetector(
-      onTap: outOfStock ? null : onTap,
-      child: Opacity(
-        opacity: outOfStock ? 0.45 : 1.0,
-        child: Container(
-          decoration: BoxDecoration(
-            color: AppColors.card,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.border),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+      onTap: outOfStock ? null : _handleTap,
+      child: ScaleTransition(
+        scale: _scale,
+        child: Opacity(
+          opacity: outOfStock ? 0.45 : 1.0,
+          child: Stack(
             children: [
-              // Image
-              Expanded(
-                child: ClipRRect(
-                  borderRadius:
-                      const BorderRadius.vertical(top: Radius.circular(12)),
-                  child: product.firstImage.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: product.firstImage,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                          placeholder: (_, __) =>
-                              Container(color: AppColors.bg),
-                          errorWidget: (_, __, ___) => Container(
-                              color: AppColors.bg,
-                              child: const Icon(Icons.image_outlined)),
-                        )
-                      : Container(
-                          color: AppColors.bg,
-                          child: const Center(
-                              child: Icon(Icons.image_outlined, size: 32)),
-                        ),
+              Container(
+                decoration: BoxDecoration(
+                  color: AppColors.card,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.border),
                 ),
-              ),
-              // Info
-              Padding(
-                padding: const EdgeInsets.all(8),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      product.name,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.poppins(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
+                    // Image
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(12)),
+                        child: widget.product.firstImage.isNotEmpty
+                            ? CachedNetworkImage(
+                                imageUrl: widget.product.firstImage,
+                                fit: BoxFit.cover,
+                                width: double.infinity,
+                                placeholder: (_, __) =>
+                                    Container(color: AppColors.bg),
+                                errorWidget: (_, __, ___) => Container(
+                                    color: AppColors.bg,
+                                    child: const Icon(Icons.image_outlined)),
+                              )
+                            : Container(
+                                color: AppColors.bg,
+                                child: const Center(
+                                    child:
+                                        Icon(Icons.image_outlined, size: 32)),
+                              ),
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          fmtPrice(product.discountedPrice),
-                          style: GoogleFonts.poppins(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 5, vertical: 1),
-                          decoration: BoxDecoration(
-                            color: outOfStock
-                                ? AppColors.textLight.withValues(alpha: 0.2)
-                                : AppColors.primary.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            outOfStock ? 'Out' : '${product.stock}',
+                    // Info
+                    Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.product.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                             style: GoogleFonts.poppins(
-                              fontSize: 9,
+                              fontSize: 11,
                               fontWeight: FontWeight.w600,
-                              color: outOfStock
-                                  ? AppColors.textLight
-                                  : AppColors.primary,
+                              color: AppColors.textPrimary,
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                fmtPrice(widget.product.discountedPrice),
+                                style: GoogleFonts.poppins(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.primary,
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: outOfStock
+                                      ? AppColors.textLight
+                                          .withValues(alpha: 0.2)
+                                      : AppColors.primary
+                                          .withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  outOfStock
+                                      ? 'Out'
+                                      : '${widget.product.stock}',
+                                  style: GoogleFonts.poppins(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w600,
+                                    color: outOfStock
+                                        ? AppColors.textLight
+                                        : AppColors.primary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ],
+                ),
+              ),
+              // Green flash overlay on add
+              FadeTransition(
+                opacity: _checkOpacity,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: AppColors.success.withValues(alpha: 0.30),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  alignment: Alignment.center,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: AppColors.success,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 24),
+                  ),
                 ),
               ),
             ],
@@ -1185,7 +1287,8 @@ class _CartPanelState extends State<_CartPanel> {
                 border: Border.all(color: AppColors.border),
               ),
               child: Row(children: [
-                Icon(Icons.person_rounded, size: 18, color: AppColors.textMedium),
+                Icon(Icons.person_rounded,
+                    size: 18, color: AppColors.textMedium),
                 const SizedBox(width: 8),
                 Expanded(
                   child: DropdownButton<String>(
@@ -1501,30 +1604,25 @@ class _CartPanelState extends State<_CartPanel> {
                         const SizedBox(width: 8),
                         Expanded(
                           flex: 2,
-                          child: pos.isProcessing.value
-                              ? const Center(child: CircularProgressIndicator())
-                              : ElevatedButton.icon(
-                                  onPressed: pos.canCharge
-                                      ? () => _processPayment(context)
-                                      : null,
-                                  icon: const Icon(Icons.check_circle_rounded,
-                                      size: 18),
-                                  label: Text('ကောက်ခံ',
-                                      style: GoogleFonts.poppins(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w700)),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: AppColors.primary,
-                                    foregroundColor: Colors.white,
-                                    disabledBackgroundColor: AppColors.textLight
-                                        .withValues(alpha: 0.3),
-                                    padding: const EdgeInsets.symmetric(
-                                        vertical: 13),
-                                    shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(12)),
-                                  ),
-                                ),
+                          child: ElevatedButton.icon(
+                            onPressed: pos.canCharge
+                                ? () => _processPayment(context)
+                                : null,
+                            icon: const Icon(Icons.check_circle_rounded,
+                                size: 18),
+                            label: Text('ကောက်ခံ',
+                                style: GoogleFonts.poppins(
+                                    fontSize: 14, fontWeight: FontWeight.w700)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.primary,
+                              foregroundColor: Colors.white,
+                              disabledBackgroundColor:
+                                  AppColors.textLight.withValues(alpha: 0.3),
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                          ),
                         ),
                       ]),
                   ],
@@ -1535,8 +1633,8 @@ class _CartPanelState extends State<_CartPanel> {
   }
 
   Future<void> _processPayment(BuildContext context) async {
-    final sale = await pos.processPayment(_cashierName,
-        staffName: _selectedStaff ?? '');
+    final sale =
+        await pos.processPayment(_cashierName, staffName: _selectedStaff ?? '');
     if (sale == null) return;
     // Cart is now cleared — hide payment view so the (empty) cart shows
     _cashCtrl.clear();
@@ -1938,7 +2036,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
         storeAddress: prefs.getString(ReceiptSettings.kStoreAddress) ??
             '54 လမ်း, 115D လမ်းထောင့်',
         footer: prefs.getString(ReceiptSettings.kFooter) ??
-            'အားပေးမှုကိုကျေးဇူးတင်ပါတယ်',
+            'အားပေးမှုကိုကျေးဇူးတင်ပါသည်',
         showId: prefs.getBool(ReceiptSettings.kShowId) ?? true,
         showCashier: prefs.getBool(ReceiptSettings.kShowCashier) ?? true,
         showDate: prefs.getBool(ReceiptSettings.kShowDate) ?? true,
@@ -2022,7 +2120,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
                                       strokeWidth: 2, color: Colors.white))
                               : const Icon(Icons.photo_camera_rounded,
                                   size: 16),
-                          label: Text('ဓာတ်ပုံ ပရင့်ထုတ်ရန်',
+                          label: Text('SS ပရင့်ထုတ်',
                               style: GoogleFonts.poppins(
                                   fontSize: 13, fontWeight: FontWeight.w600)),
                           style: ElevatedButton.styleFrom(
@@ -2216,7 +2314,7 @@ class _ReceiptDialogState extends State<_ReceiptDialog> {
               child: pw.Text('Thank you! / Kyay Zu Tin Bar Tae',
                   style: const pw.TextStyle(fontSize: 9)),
             ),
-            pw.SizedBox(height: 40),
+            pw.SizedBox(height: 80),
           ],
         ),
       ),
@@ -2353,6 +2451,7 @@ class _ReceiptBody extends StatelessWidget {
                 style: GoogleFonts.poppins(
                     fontSize: 12, color: AppColors.textMedium)),
           ),
+        const SizedBox(height: 60),
       ],
     );
   }
@@ -2544,20 +2643,56 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
   String _query = '';
   late TabController _phoneTabCtrl;
 
+  // ── Date filter ───────────────────────────────────────────────────────────
+  late DateTime _selectedDate;
+
   // ── Chart state ───────────────────────────────────────────────────────────
   Map<DateTime, double> _chartData = {};
   bool _chartLoading = false;
   late DateTime _chartFrom;
   late DateTime _chartTo;
 
+  // ── Expenses ──────────────────────────────────────────────────────────────
+  List<Map<String, dynamic>> _expenses = [];
+
   @override
   void initState() {
     super.initState();
     _phoneTabCtrl = TabController(length: 2, vsync: this);
     final now = DateTime.now();
-    _chartTo = DateTime(now.year, now.month, now.day);
+    _selectedDate = DateTime(now.year, now.month, now.day);
+    _chartTo = _selectedDate;
     _chartFrom = _chartTo.subtract(const Duration(days: 6));
+    widget.pos.fetchSalesHistory(date: _selectedDate);
     _fetchChart();
+    _fetchExpenses();
+  }
+
+  Future<void> _fetchExpenses() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('pos_expenses')
+          .orderBy('date', descending: true)
+          .limit(500)
+          .get();
+      if (mounted) {
+        setState(() {
+          _expenses = snap.docs.map((d) => {...d.data(), 'id': d.id}).toList();
+        });
+      }
+    } catch (_) {}
+  }
+
+  double _expensesForDay(DateTime day) {
+    return _expenses.fold(0.0, (sum, e) {
+      final ts = e['date'] as Timestamp?;
+      if (ts == null) return sum;
+      final d = ts.toDate();
+      if (d.year == day.year && d.month == day.month && d.day == day.day) {
+        return sum + ((e['amount'] as num?)?.toDouble() ?? 0);
+      }
+      return sum;
+    });
   }
 
   @override
@@ -2623,6 +2758,33 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
     }
   }
 
+  bool get _isToday {
+    final now = DateTime.now();
+    return _selectedDate.year == now.year &&
+        _selectedDate.month == now.month &&
+        _selectedDate.day == now.day;
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.light(primary: AppColors.primary),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null && mounted) {
+      final day = DateTime(picked.year, picked.month, picked.day);
+      setState(() => _selectedDate = day);
+      widget.pos.fetchSalesHistory(date: day);
+    }
+  }
+
   List<PosSaleModel> _filtered(List<PosSaleModel> all) {
     if (_query.isEmpty) return all;
     final q = _query.toLowerCase();
@@ -2652,13 +2814,13 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
     final total = _chartData.values.fold<double>(0, (a, b) => a + b);
     final activeDays = _chartData.values.where((v) => v > 0).length;
 
-    // ── Today's payment breakdown ──────────────────────────────────────────
-    final now = DateTime.now();
+    // ── Selected-date payment breakdown ───────────────────────────────────────
+    final sel = _selectedDate;
     final todaySales = widget.pos.salesHistory.where((s) {
       final d = s.createdAt;
-      return d.year == now.year &&
-          d.month == now.month &&
-          d.day == now.day &&
+      return d.year == sel.year &&
+          d.month == sel.month &&
+          d.day == sel.day &&
           !s.isRefundRecord;
     }).toList();
 
@@ -2679,9 +2841,39 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
           break;
       }
     }
+    // Subtract refunds from the appropriate payment method bucket
+    final todayRefunds = widget.pos.salesHistory.where((s) {
+      final d = s.createdAt;
+      return d.year == sel.year &&
+          d.month == sel.month &&
+          d.day == sel.day &&
+          s.isRefundRecord;
+    });
+    for (final r in todayRefunds) {
+      switch (r.paymentMethod) {
+        case 'cash':
+          todayCash -= r.total;
+          break;
+        case 'kpay':
+          todayKpay -= r.total;
+          break;
+        case 'wavepay':
+          todayWave -= r.total;
+          break;
+        case 'card':
+          todayCard -= r.total;
+          break;
+      }
+    }
+    todayCash = todayCash.clamp(0, double.infinity);
+    todayKpay = todayKpay.clamp(0, double.infinity);
+    todayWave = todayWave.clamp(0, double.infinity);
+    todayCard = todayCard.clamp(0, double.infinity);
     final todayTotal = todayCash + todayKpay + todayWave + todayCard;
     final todayProfit = todaySales.fold<double>(0, (a, s) => a + s.totalProfit);
     final hasProfitData = todaySales.any((s) => s.hasProfitData);
+    final todayExpenses = _expensesForDay(sel);
+    final todayNet = todayTotal - todayExpenses;
 
     return Container(
       color: AppColors.card,
@@ -2689,8 +2881,11 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Today's breakdown ─────────────────────────────────────────────
-          Text('ယနေ့ ရောင်းချမှု',
+          // ── Selected-date breakdown ───────────────────────────────────────
+          Text(
+              _isToday
+                  ? 'ယနေ့ ရောင်းချမှု'
+                  : '${DateFormat('dd MMM yyyy').format(sel)} ရောင်းချမှု',
               style: GoogleFonts.poppins(
                   fontSize: 12,
                   fontWeight: FontWeight.w700,
@@ -2738,7 +2933,7 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('ယနေ့ စုစုပေါင်း',
+                Text(_isToday ? 'ယနေ့ စုစုပေါင်း' : 'စုစုပေါင်း',
                     style: GoogleFonts.poppins(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -2784,6 +2979,68 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
               ],
             ),
           ),
+          if (todayExpenses > 0) ...[
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE53935).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(children: [
+                    const Icon(Icons.money_off_rounded,
+                        size: 14, color: Color(0xFFE53935)),
+                    const SizedBox(width: 4),
+                    Text('ယနေ့ ကုန်ကျစရိတ်',
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFFE53935))),
+                  ]),
+                  Text('-${fmtPrice(todayExpenses)}',
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFFE53935))),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1565C0).withValues(alpha: 0.09),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: const Color(0xFF1565C0).withValues(alpha: 0.25)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(children: [
+                    const Icon(Icons.account_balance_wallet_rounded,
+                        size: 14, color: Color(0xFF1565C0)),
+                    const SizedBox(width: 4),
+                    Text('ကျန် (ရောင်းချ - ကုန်ကျ)',
+                        style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF1565C0))),
+                  ]),
+                  Text(fmtPrice(todayNet),
+                      style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF1565C0))),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           const Divider(height: 1),
           const SizedBox(height: 10),
@@ -2977,14 +3234,58 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
   Widget _buildSalesList() {
     return Column(
       children: [
+        // ── Date picker row ───────────────────────────────────────────────────
         Container(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          color: AppColors.card,
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickDate,
+                  icon: const Icon(Icons.calendar_today_rounded, size: 16),
+                  label: Text(
+                    _isToday
+                        ? 'ယနေ့ (${DateFormat('dd MMM yyyy').format(_selectedDate)})'
+                        : DateFormat('dd MMM yyyy').format(_selectedDate),
+                    style: GoogleFonts.poppins(
+                        fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primary,
+                    side: BorderSide(
+                        color: AppColors.primary.withValues(alpha: 0.4)),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ),
+              if (!_isToday) ...[
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: 'ယနေ့သို့ ပြန်သွားရန်',
+                  onPressed: () {
+                    final today = DateTime.now();
+                    final day = DateTime(today.year, today.month, today.day);
+                    setState(() => _selectedDate = day);
+                    widget.pos.fetchSalesHistory(date: day);
+                  },
+                  icon: Icon(Icons.today_rounded,
+                      color: AppColors.primary, size: 22),
+                ),
+              ],
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
           color: AppColors.card,
           child: TextField(
             controller: _searchCtrl,
             onChanged: (v) => setState(() => _query = v),
-            style: GoogleFonts.poppins(
-                fontSize: 14, color: AppColors.textPrimary),
+            style:
+                GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
             decoration: InputDecoration(
               hintText: 'ID၊ ကက်ရှယာ၊ ကုန်ပစ္စည်းဖြင့် ရှာမည်...',
               prefixIcon: const Icon(Icons.search_rounded, size: 20),
@@ -3044,11 +3345,119 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
                 ),
               );
             }
+            // Merge sales + expenses sorted newest-first — filter to selected date
+            final expForRange = _expenses.where((e) {
+              final ts = e['date'] as Timestamp?;
+              if (ts == null) return false;
+              final d = ts.toDate();
+              return d.year == _selectedDate.year &&
+                  d.month == _selectedDate.month &&
+                  d.day == _selectedDate.day;
+            }).toList();
+
+            // Build unified list: (type:'sale'|'expense', data)
+            final merged = <({
+              String type,
+              PosSaleModel? sale,
+              Map<String, dynamic>? expense
+            })>[];
+            for (final s in list) {
+              merged.add((type: 'sale', sale: s, expense: null));
+            }
+            for (final e in expForRange) {
+              merged.add((type: 'expense', sale: null, expense: e));
+            }
+            merged.sort((a, b) {
+              DateTime aDate, bDate;
+              if (a.type == 'sale') {
+                aDate = a.sale!.createdAt;
+              } else {
+                final ts = a.expense!['date'] as Timestamp?;
+                aDate = ts?.toDate() ?? DateTime(2000);
+              }
+              if (b.type == 'sale') {
+                bDate = b.sale!.createdAt;
+              } else {
+                final ts = b.expense!['date'] as Timestamp?;
+                bDate = ts?.toDate() ?? DateTime(2000);
+              }
+              return bDate.compareTo(aDate);
+            });
+
             return ListView.builder(
               padding: const EdgeInsets.all(16),
-              itemCount: list.length,
+              itemCount: merged.length,
               itemBuilder: (_, i) {
-                final sale = list[i];
+                final item = merged[i];
+
+                // ── Expense card ──
+                if (item.type == 'expense') {
+                  final e = item.expense!;
+                  final ts = e['date'] as Timestamp?;
+                  final amt = (e['amount'] as num?)?.toDouble() ?? 0;
+                  final note = (e['note'] as String?) ?? '';
+                  final dateStr = ts != null
+                      ? DateFormat('dd MMM yyyy').format(ts.toDate())
+                      : '';
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    color: const Color(0xFFE53935).withValues(alpha: 0.06),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                            color: const Color(0xFFE53935)
+                                .withValues(alpha: 0.25))),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE53935)
+                                  .withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(Icons.money_off_rounded,
+                                color: Color(0xFFE53935)),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  note.isNotEmpty ? note : 'ကုန်ကျစရိတ်',
+                                  style: GoogleFonts.poppins(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                Text(dateStr,
+                                    style: GoogleFonts.poppins(
+                                        fontSize: 10,
+                                        color: AppColors.textLight)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '-${fmtPrice(amt)}',
+                            style: GoogleFonts.poppins(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: const Color(0xFFE53935)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+
+                // ── Sale card ──
+                final sale = item.sale!;
                 final isRefund = sale.isRefundRecord;
                 final isRefunded = sale.isRefunded;
                 return Card(
@@ -3192,8 +3601,8 @@ class _SalesHistoryTabState extends State<_SalesHistoryTab>
               indicatorColor: AppColors.primary,
               labelStyle: GoogleFonts.poppins(
                   fontSize: 13, fontWeight: FontWeight.w600),
-              unselectedLabelStyle:
-                  GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w500),
+              unselectedLabelStyle: GoogleFonts.poppins(
+                  fontSize: 13, fontWeight: FontWeight.w500),
               tabs: const [
                 Tab(text: 'ရောင်းချမှု သမိုင်း'),
                 Tab(text: 'ယနေ့ ရောင်းချမှု'),
@@ -3417,7 +3826,7 @@ class _CashNumpadState extends State<_CashNumpad> {
         ),
 
         // Numpad grid
-        const SizedBox(height: 2),
+
         GridView.count(
           crossAxisCount: 3,
           shrinkWrap: true,
@@ -3636,7 +4045,7 @@ class _RefundDialogState extends State<_RefundDialog> {
 
   bool get _hasSelection => _refundQtys.any((q) => q > 0);
 
-  Future<void> _confirm(BuildContext context) async {
+  void _confirm(BuildContext context) {
     final refundItems = <Map<String, dynamic>>[];
     for (int i = 0; i < widget.sale.items.length; i++) {
       if (_refundQtys[i] > 0) {
@@ -3648,16 +4057,13 @@ class _RefundDialogState extends State<_RefundDialog> {
         });
       }
     }
-    final id = await widget.pos.processRefund(widget.sale, refundItems);
-    if (!context.mounted) return;
+    widget.pos.queueRefund(widget.sale, refundItems);
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(
-        id != null ? 'Refund $id processed' : 'Refund failed',
-        style: GoogleFonts.poppins(),
-      ),
-      backgroundColor: id != null ? Colors.green : AppColors.secondary,
+      content: Text('ပြန်အမ်းနေပါသည်…', style: GoogleFonts.poppins()),
+      backgroundColor: Colors.green,
       behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 2),
     ));
   }
 
@@ -3797,26 +4203,17 @@ class _RefundDialogState extends State<_RefundDialog> {
           child: Text('မလုပ်တော့',
               style: GoogleFonts.poppins(color: AppColors.textMedium)),
         ),
-        Obx(() => ElevatedButton.icon(
-              onPressed: (_hasSelection && !widget.pos.isProcessing.value)
-                  ? () => _confirm(context)
-                  : null,
-              icon: widget.pos.isProcessing.value
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.undo_rounded, size: 16),
-              label: Text('ပြန်အမ်းငွေ အတည်ပြုရန်',
-                  style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.secondary,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor:
-                    AppColors.textLight.withValues(alpha: 0.3),
-              ),
-            )),
+        ElevatedButton.icon(
+          onPressed: _hasSelection ? () => _confirm(context) : null,
+          icon: const Icon(Icons.undo_rounded, size: 16),
+          label: Text('ပြန်အမ်းငွေ အတည်ပြုရန်',
+              style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.secondary,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: AppColors.textLight.withValues(alpha: 0.3),
+          ),
+        ),
       ],
     );
   }
@@ -4175,8 +4572,7 @@ class _LowStockPageState extends State<_LowStockPage> {
         if (isWide) {
           return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             SizedBox(width: 300, child: _buildLeftPanel()),
-            VerticalDivider(
-                width: 1, thickness: 1, color: AppColors.border),
+            VerticalDivider(width: 1, thickness: 1, color: AppColors.border),
             Expanded(child: _buildProductArea(isGrid: true)),
           ]);
         }
@@ -4194,8 +4590,8 @@ class _LowStockPageState extends State<_LowStockPage> {
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Row(children: [
         Text('သတိပေးမှု: ',
-            style: GoogleFonts.poppins(
-                fontSize: 13, color: AppColors.textMedium)),
+            style:
+                GoogleFonts.poppins(fontSize: 13, color: AppColors.textMedium)),
         Expanded(
           child: Slider(
             value: _threshold.toDouble(),
@@ -4205,7 +4601,10 @@ class _LowStockPageState extends State<_LowStockPage> {
             activeColor: _amber,
             label: _threshold.toString(),
             onChanged: (v) => setState(() => _threshold = v.toInt()),
-            onChangeEnd: (v) { _saveThreshold(v.toInt()); _fetch(); },
+            onChangeEnd: (v) {
+              _saveThreshold(v.toInt());
+              _fetch();
+            },
           ),
         ),
         Container(
@@ -4216,18 +4615,15 @@ class _LowStockPageState extends State<_LowStockPage> {
           ),
           child: Text('≤ $_threshold',
               style: GoogleFonts.poppins(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: _amber)),
+                  fontSize: 13, fontWeight: FontWeight.w700, color: _amber)),
         ),
       ]),
     );
   }
 
   Widget _buildLeftPanel() {
-    final outCount = _items
-        .where((i) => ((i['stock'] as num?)?.toInt() ?? 0) == 0)
-        .length;
+    final outCount =
+        _items.where((i) => ((i['stock'] as num?)?.toInt() ?? 0) == 0).length;
     final lowCount = _items.length - outCount;
 
     return Container(
@@ -4235,9 +4631,7 @@ class _LowStockPageState extends State<_LowStockPage> {
       height: double.infinity,
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
-        child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('ကုန်ပစ္စည်း အနေအထား',
               style: GoogleFonts.poppins(
                   fontSize: 14,
@@ -4284,12 +4678,14 @@ class _LowStockPageState extends State<_LowStockPage> {
             activeColor: _amber,
             label: _threshold.toString(),
             onChanged: (v) => setState(() => _threshold = v.toInt()),
-            onChangeEnd: (v) { _saveThreshold(v.toInt()); _fetch(); },
+            onChangeEnd: (v) {
+              _saveThreshold(v.toInt());
+              _fetch();
+            },
           ),
           Center(
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
               decoration: BoxDecoration(
                 color: _amber.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(20),
@@ -4477,8 +4873,7 @@ class _LowStockPageState extends State<_LowStockPage> {
         Padding(
           padding: const EdgeInsets.only(right: 12),
           child: Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
               color: color.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(8),
@@ -4486,9 +4881,7 @@ class _LowStockPageState extends State<_LowStockPage> {
             child: Text(
               isOut ? 'OUT' : '$stock',
               style: GoogleFonts.poppins(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: color),
+                  fontSize: 13, fontWeight: FontWeight.w700, color: color),
             ),
           ),
         ),
@@ -4606,9 +4999,8 @@ class _HardwarePageState extends State<HardwarePage> {
                         connected
                             ? Icons.bluetooth_connected_rounded
                             : Icons.bluetooth_disabled_rounded,
-                        color: connected
-                            ? const Color(0xFF27AE60)
-                            : Colors.orange,
+                        color:
+                            connected ? const Color(0xFF27AE60) : Colors.orange,
                         size: 22,
                       ),
                       const SizedBox(width: 10),
@@ -4693,12 +5085,11 @@ class _HardwarePageState extends State<HardwarePage> {
                         const SizedBox(height: 6),
                         Text('Paired ပရင်တာ မတွေ့ပါ',
                             style: GoogleFonts.poppins(
-                                fontSize: 12,
-                                color: AppColors.textMedium)),
-                        Text('Refresh နှိပ်ပါ သို့မဟုတ် အောက်ပါ အဆင့်များ လိုက်နာပါ',
+                                fontSize: 12, color: AppColors.textMedium)),
+                        Text(
+                            'Refresh နှိပ်ပါ သို့မဟုတ် အောက်ပါ အဆင့်များ လိုက်နာပါ',
                             style: GoogleFonts.poppins(
-                                fontSize: 11,
-                                color: AppColors.textLight)),
+                                fontSize: 11, color: AppColors.textLight)),
                       ]),
                     );
                   }
@@ -4740,8 +5131,7 @@ class _HardwarePageState extends State<HardwarePage> {
                                   color: AppColors.textPrimary)),
                           subtitle: Text(d.address,
                               style: GoogleFonts.poppins(
-                                  fontSize: 10,
-                                  color: AppColors.textMedium)),
+                                  fontSize: 10, color: AppColors.textMedium)),
                           trailing: isThis
                               ? Container(
                                   padding: const EdgeInsets.symmetric(
@@ -4749,16 +5139,13 @@ class _HardwarePageState extends State<HardwarePage> {
                                   decoration: BoxDecoration(
                                     color: const Color(0xFF27AE60)
                                         .withValues(alpha: 0.12),
-                                    borderRadius:
-                                        BorderRadius.circular(6),
+                                    borderRadius: BorderRadius.circular(6),
                                   ),
                                   child: Text('Connected',
                                       style: GoogleFonts.poppins(
                                           fontSize: 10,
-                                          color:
-                                              const Color(0xFF27AE60),
-                                          fontWeight:
-                                              FontWeight.w600)),
+                                          color: const Color(0xFF27AE60),
+                                          fontWeight: FontWeight.w600)),
                                 )
                               : Obx(() => bt.isConnecting.value
                                   ? const SizedBox(
@@ -4769,21 +5156,16 @@ class _HardwarePageState extends State<HardwarePage> {
                                   : ElevatedButton(
                                       onPressed: () => bt.connect(d),
                                       style: ElevatedButton.styleFrom(
-                                        backgroundColor:
-                                            AppColors.primary,
+                                        backgroundColor: AppColors.primary,
                                         foregroundColor: Colors.white,
-                                        padding:
-                                            const EdgeInsets.symmetric(
-                                                horizontal: 12,
-                                                vertical: 6),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 12, vertical: 6),
                                         shape: RoundedRectangleBorder(
                                             borderRadius:
-                                                BorderRadius.circular(
-                                                    8)),
+                                                BorderRadius.circular(8)),
                                         minimumSize: Size.zero,
                                         tapTargetSize:
-                                            MaterialTapTargetSize
-                                                .shrinkWrap,
+                                            MaterialTapTargetSize.shrinkWrap,
                                       ),
                                       child: Text('ချိတ်ဆက်ရန်',
                                           style: GoogleFonts.poppins(
@@ -4803,8 +5185,8 @@ class _HardwarePageState extends State<HardwarePage> {
                   decoration: BoxDecoration(
                     color: Colors.amber.withValues(alpha: 0.07),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                        color: Colors.amber.withValues(alpha: 0.35)),
+                    border:
+                        Border.all(color: Colors.amber.withValues(alpha: 0.35)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4820,17 +5202,14 @@ class _HardwarePageState extends State<HardwarePage> {
                                 color: Colors.amber)),
                       ]),
                       const SizedBox(height: 6),
-                      _StepRow(
-                          step: '1',
-                          text: 'ပရင်တာကို ဖွင့်ပါ (Power ON)'),
+                      _StepRow(step: '1', text: 'ပရင်တာကို ဖွင့်ပါ (Power ON)'),
                       _StepRow(
                           step: '2',
                           text:
                               'ဖုန်း Settings → Bluetooth တွင် ပရင်တာကို Pair ဦးပါ'),
                       _StepRow(
                           step: '3',
-                          text:
-                              'ဤနေရာသို့ ပြန်လာပြီး Refresh (↻) နှိပ်ပါ'),
+                          text: 'ဤနေရာသို့ ပြန်လာပြီး Refresh (↻) နှိပ်ပါ'),
                       _StepRow(
                           step: '4',
                           text:
@@ -5029,7 +5408,6 @@ class _HardwarePageState extends State<HardwarePage> {
       ),
     );
   }
-
 }
 
 class _ConnInfoBox extends StatelessWidget {
@@ -6374,8 +6752,12 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
   bool _chartLoading = false;
 
   static const _barColors = [
-    Color(0xFF6A1B9A), Color(0xFF1976D2), Color(0xFF00897B),
-    Color(0xFFFF8C00), Color(0xFFC62828), Color(0xFF2E7D32),
+    Color(0xFF6A1B9A),
+    Color(0xFF1976D2),
+    Color(0xFF00897B),
+    Color(0xFFFF8C00),
+    Color(0xFFC62828),
+    Color(0xFF2E7D32),
   ];
 
   @override
@@ -6415,7 +6797,11 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
         final amount = (d['total'] as num?)?.toDouble() ?? 0;
         map[staffName] = (map[staffName] ?? 0) + amount;
       }
-      if (mounted) setState(() { _chartData = map; _chartLoading = false; });
+      if (mounted)
+        setState(() {
+          _chartData = map;
+          _chartLoading = false;
+        });
     } catch (_) {
       if (mounted) setState(() => _chartLoading = false);
     }
@@ -6424,13 +6810,10 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final snap =
-          await _db.collection('pos_staff').orderBy('name').get();
+      final snap = await _db.collection('pos_staff').orderBy('name').get();
       if (mounted) {
         setState(() {
-          _staff = snap.docs
-              .map((d) => {'id': d.id, ...d.data()})
-              .toList();
+          _staff = snap.docs.map((d) => {'id': d.id, ...d.data()}).toList();
           _loading = false;
         });
       }
@@ -6510,7 +6893,10 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
         actions: [
           IconButton(
               icon: const Icon(Icons.refresh_rounded),
-              onPressed: () { _load(); _fetchChart(); }),
+              onPressed: () {
+                _load();
+                _fetchChart();
+              }),
         ],
       ),
       body: LayoutBuilder(builder: (_, constraints) {
@@ -6523,8 +6909,7 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
                 _buildStaffList(),
               ]),
             ),
-            VerticalDivider(
-                width: 1, thickness: 1, color: AppColors.border),
+            VerticalDivider(width: 1, thickness: 1, color: AppColors.border),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.only(bottom: 16),
@@ -6550,16 +6935,16 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
         Expanded(
           child: TextField(
             controller: _nameCtrl,
-            style: GoogleFonts.poppins(
-                fontSize: 14, color: AppColors.textPrimary),
+            style:
+                GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
             decoration: InputDecoration(
               hintText: 'ဝန်ထမ်းအမည် ထည့်ပါ...',
               hintStyle: GoogleFonts.poppins(
                   fontSize: 13, color: AppColors.textMedium),
               filled: true,
               fillColor: AppColors.bg,
-              contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 14, vertical: 12),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
                 borderSide: BorderSide.none,
@@ -6584,10 +6969,9 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
           style: ElevatedButton.styleFrom(
             backgroundColor: AppColors.primary,
             foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(
-                horizontal: 16, vertical: 14),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10)),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           ),
         ),
       ]),
@@ -6600,17 +6984,14 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
           ? const Center(child: CircularProgressIndicator())
           : _staff.isEmpty
               ? Center(
-                  child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.people_outline_rounded,
-                            size: 52, color: AppColors.textLight),
-                        const SizedBox(height: 10),
-                        Text('ဝန်ထမ်း မရှိသေးပါ',
-                            style: GoogleFonts.poppins(
-                                fontSize: 14,
-                                color: AppColors.textMedium)),
-                      ]))
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.people_outline_rounded,
+                      size: 52, color: AppColors.textLight),
+                  const SizedBox(height: 10),
+                  Text('ဝန်ထမ်း မရှိသေးပါ',
+                      style: GoogleFonts.poppins(
+                          fontSize: 14, color: AppColors.textMedium)),
+                ]))
               : ListView.separated(
                   padding: const EdgeInsets.all(16),
                   itemCount: _staff.length,
@@ -6660,8 +7041,7 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
                                   '${_chartFilter == 'day' ? 'ယနေ့' : 'ဤလ'}: ${fmtPrice(amount)}',
                                   style: GoogleFonts.poppins(
                                       fontSize: 11,
-                                      color: _barColors[
-                                          i % _barColors.length]),
+                                      color: _barColors[i % _barColors.length]),
                                 ),
                             ],
                           ),
@@ -6681,9 +7061,7 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
   Widget _buildSalesChart() {
     final entries = _chartData.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
-    final maxVal = entries.isEmpty
-        ? 1000.0
-        : entries.first.value * 1.25;
+    final maxVal = entries.isEmpty ? 1000.0 : entries.first.value * 1.25;
 
     return Container(
       color: AppColors.card,
@@ -6728,26 +7106,22 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
                   ? Center(
                       child: Text('ဤကာလ ရောင်းချမှု မရှိပါ',
                           style: GoogleFonts.poppins(
-                              fontSize: 12,
-                              color: AppColors.textMedium)))
+                              fontSize: 12, color: AppColors.textMedium)))
                   : BarChart(
                       BarChartData(
                         maxY: maxVal,
                         minY: 0,
                         barGroups: entries.asMap().entries.map((e) {
                           final idx = e.key;
-                          final color =
-                              _barColors[idx % _barColors.length];
+                          final color = _barColors[idx % _barColors.length];
                           return BarChartGroupData(
                             x: idx,
                             barRods: [
                               BarChartRodData(
                                 toY: e.value.value,
-                                width: (220 / entries.length)
-                                    .clamp(12.0, 40.0),
-                                borderRadius:
-                                    const BorderRadius.vertical(
-                                        top: Radius.circular(6)),
+                                width: (220 / entries.length).clamp(12.0, 40.0),
+                                borderRadius: const BorderRadius.vertical(
+                                    top: Radius.circular(6)),
                                 color: color,
                               ),
                             ],
@@ -6755,11 +7129,9 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
                         }).toList(),
                         titlesData: FlTitlesData(
                           topTitles: const AxisTitles(
-                              sideTitles:
-                                  SideTitles(showTitles: false)),
+                              sideTitles: SideTitles(showTitles: false)),
                           rightTitles: const AxisTitles(
-                              sideTitles:
-                                  SideTitles(showTitles: false)),
+                              sideTitles: SideTitles(showTitles: false)),
                           leftTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
@@ -6809,8 +7181,7 @@ class _StaffManagementPageState extends State<_StaffManagementPage> {
                           drawVerticalLine: false,
                           horizontalInterval: maxVal / 4,
                           getDrawingHorizontalLine: (_) => FlLine(
-                            color:
-                                AppColors.border.withValues(alpha: 0.4),
+                            color: AppColors.border.withValues(alpha: 0.4),
                             strokeWidth: 0.5,
                           ),
                         ),
@@ -6947,8 +7318,8 @@ class _BarcodeScanSheetState extends State<_BarcodeScanSheet> {
             child: Stack(
               children: [
                 ClipRRect(
-                  borderRadius: const BorderRadius.vertical(
-                      bottom: Radius.circular(20)),
+                  borderRadius:
+                      const BorderRadius.vertical(bottom: Radius.circular(20)),
                   child: MobileScanner(
                     controller: _ctrl,
                     onDetect: _onDetect,
@@ -7000,8 +7371,8 @@ class _ScanOverlayPainter extends CustomPainter {
     const holeH = 120.0;
     final cx = size.width / 2;
     final cy = size.height / 2;
-    final hole = Rect.fromCenter(
-        center: Offset(cx, cy), width: holeW, height: holeH);
+    final hole =
+        Rect.fromCenter(center: Offset(cx, cy), width: holeW, height: holeH);
 
     final paint = Paint()..color = Colors.black.withValues(alpha: 0.55);
     final full = Path()..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
@@ -7013,4 +7384,677 @@ class _ScanOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter old) => false;
+}
+
+// ─── Expenses Tab ────────────────────────────────────────────────────────────
+
+class _ExpensesTab extends StatefulWidget {
+  const _ExpensesTab();
+
+  @override
+  State<_ExpensesTab> createState() => _ExpensesTabState();
+}
+
+class _ExpensesTabState extends State<_ExpensesTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  final _col = FirebaseFirestore.instance.collection('pos_expenses');
+  List<Map<String, dynamic>> _expenses = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (!mounted) return;
+    setState(() => _loading = true);
+    try {
+      final snap =
+          await _col.orderBy('date', descending: true).limit(200).get();
+      _expenses = snap.docs.map((d) => {...d.data(), 'id': d.id}).toList();
+    } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _delete(String id) async {
+    await _col.doc(id).delete();
+    _expenses.removeWhere((e) => e['id'] == id);
+    setState(() {});
+  }
+
+  void _showAddDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => _AddExpenseDialog(
+        onAdd: (amount, date, note) async {
+          await _col.add({
+            'amount': amount,
+            'date': Timestamp.fromDate(date),
+            if (note.isNotEmpty) 'note': note,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+          await _load();
+        },
+      ),
+    );
+  }
+
+  String _fmtDate(Timestamp ts) {
+    final d = ts.toDate();
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+
+    final now = DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    final monthStart = DateTime(now.year, now.month, 1);
+
+    double todayTotal = 0;
+    double monthTotal = 0;
+    for (final e in _expenses) {
+      final ts = e['date'] as Timestamp?;
+      if (ts == null) continue;
+      final d = ts.toDate();
+      final amt = (e['amount'] as num?)?.toDouble() ?? 0;
+      if (!d.isBefore(todayStart)) todayTotal += amt;
+      if (!d.isBefore(monthStart)) monthTotal += amt;
+    }
+
+    return ColoredBox(
+      color: AppColors.bg,
+      child: Stack(
+        children: [
+          _loading
+              ? const Center(
+                  child: CircularProgressIndicator(color: AppColors.primary))
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  color: AppColors.primary,
+                  child: CustomScrollView(
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                          child: Row(
+                            children: [
+                              _ExpenseStat(
+                                label: 'ယနေ့',
+                                amount: todayTotal,
+                                icon: Icons.today_rounded,
+                              ),
+                              const SizedBox(width: 12),
+                              _ExpenseStat(
+                                label: 'ဤလ',
+                                amount: monthTotal,
+                                icon: Icons.calendar_month_rounded,
+                                highlight: true,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (_expenses.isEmpty)
+                        const SliverFillRemaining(
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.receipt_long_outlined,
+                                    size: 56, color: AppColors.textMedium),
+                                SizedBox(height: 12),
+                                Text('ကုန်ကျစရိတ် မရှိသေးပါ',
+                                    style: TextStyle(
+                                        color: AppColors.textMedium,
+                                        fontSize: 14)),
+                              ],
+                            ),
+                          ),
+                        )
+                      else
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 100),
+                          sliver: SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (ctx, i) {
+                                final e = _expenses[i];
+                                final ts = e['date'] as Timestamp?;
+                                final amt =
+                                    (e['amount'] as num?)?.toDouble() ?? 0;
+                                final note = (e['note'] as String?) ?? '';
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 10),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.card,
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(
+                                        color: AppColors.border
+                                            .withValues(alpha: 0.5)),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.04),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 12),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          width: 44,
+                                          height: 44,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFE53935)
+                                                .withValues(alpha: 0.1),
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                          ),
+                                          child: const Icon(
+                                              Icons.money_off_rounded,
+                                              color: Color(0xFFE53935),
+                                              size: 22),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                note.isNotEmpty
+                                                    ? note
+                                                    : 'ကုန်ကျစရိတ်',
+                                                style: GoogleFonts.poppins(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 14,
+                                                    color: note.isNotEmpty
+                                                        ? AppColors.textPrimary
+                                                        : AppColors.textMedium),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              if (ts != null)
+                                                Text(
+                                                  _fmtDate(ts),
+                                                  style: GoogleFonts.poppins(
+                                                      fontSize: 11,
+                                                      color:
+                                                          AppColors.textMedium),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          '${fmtPrice(amt)} ကျပ်',
+                                          style: GoogleFonts.poppins(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 15,
+                                              color: const Color(0xFFE53935)),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(
+                                              Icons.delete_outline_rounded,
+                                              color: Color(0xFFE53935),
+                                              size: 20),
+                                          onPressed: () async {
+                                            final ok = await showDialog<bool>(
+                                              context: context,
+                                              builder: (_) => AlertDialog(
+                                                backgroundColor: AppColors.card,
+                                                shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            16)),
+                                                title: Text('ဖျက်မည်လား?',
+                                                    style: GoogleFonts.poppins(
+                                                        color: AppColors
+                                                            .textPrimary,
+                                                        fontWeight:
+                                                            FontWeight.w700)),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(
+                                                            context, false),
+                                                    child: Text('မဖျက်ပါ',
+                                                        style:
+                                                            GoogleFonts.poppins(
+                                                                color: AppColors
+                                                                    .textMedium)),
+                                                  ),
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(
+                                                            context, true),
+                                                    child: Text('ဖျက်မည်',
+                                                        style: GoogleFonts.poppins(
+                                                            color: const Color(
+                                                                0xFFE53935),
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .w600)),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                            if (ok == true) {
+                                              _delete(e['id'] as String);
+                                            }
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                              childCount: _expenses.length,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+
+          // FAB
+          Positioned(
+            right: 16,
+            bottom: 20,
+            child: FloatingActionButton.extended(
+              heroTag: 'expenses_fab',
+              onPressed: _showAddDialog,
+              backgroundColor: AppColors.primary,
+              icon: const Icon(Icons.add_rounded, color: Colors.white),
+              label: Text('ကုန်ကျစရိတ် ထည့်ရန်',
+                  style: GoogleFonts.poppins(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AddExpenseDialog extends StatefulWidget {
+  final Future<void> Function(double amount, DateTime date, String note) onAdd;
+  const _AddExpenseDialog({required this.onAdd});
+
+  @override
+  State<_AddExpenseDialog> createState() => _AddExpenseDialogState();
+}
+
+class _AddExpenseDialogState extends State<_AddExpenseDialog> {
+  final _amountCtrl = TextEditingController();
+  final _noteCtrl = TextEditingController();
+  DateTime _date = DateTime.now();
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _amountCtrl.dispose();
+    _noteCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.primary,
+            surface: AppColors.card,
+            onSurface: AppColors.textPrimary,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _date = picked);
+  }
+
+  String _fmtDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  Future<void> _save() async {
+    final raw = _amountCtrl.text.trim().replaceAll(',', '');
+    final amount = double.tryParse(raw);
+    if (amount == null || amount <= 0) return;
+    setState(() => _saving = true);
+    await widget.onAdd(amount, _date, _noteCtrl.text.trim());
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.card,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: Text('ကုန်ကျစရိတ် ထည့်ရန်',
+          style: GoogleFonts.poppins(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w700,
+              fontSize: 16)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('ဘာအတွက်?',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          TextField(
+            controller: _noteCtrl,
+            style:
+                GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 14),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: AppColors.bg,
+              prefixIcon: const Icon(Icons.notes_rounded,
+                  color: AppColors.primary, size: 20),
+              hintText: 'ဥပမာ: လျှပ်စစ်ဘိုး, ငှားခ...',
+              hintStyle: GoogleFonts.poppins(
+                  color: AppColors.textMedium, fontSize: 13),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: AppColors.primary, width: 1.5),
+              ),
+            ),
+          ),
+          Text('ငွေပမာဏ (ကျပ်)',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          TextField(
+            controller: _amountCtrl,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            style: GoogleFonts.poppins(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 18),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: AppColors.bg,
+              prefixIcon: const Icon(Icons.attach_money_rounded,
+                  color: AppColors.primary, size: 20),
+              hintText: '0',
+              hintStyle: GoogleFonts.poppins(
+                  color: AppColors.textMedium, fontSize: 18),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: AppColors.primary, width: 1.5),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text('ရက်စွဲ',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textMedium,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: _pickDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: AppColors.bg,
+                borderRadius: BorderRadius.circular(12),
+                border:
+                    Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.calendar_today_rounded,
+                      color: AppColors.primary, size: 18),
+                  const SizedBox(width: 10),
+                  Text(
+                    _fmtDate(_date),
+                    style: GoogleFonts.poppins(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14),
+                  ),
+                  const Spacer(),
+                  const Icon(Icons.arrow_drop_down_rounded,
+                      color: AppColors.textMedium),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.pop(context),
+          child: Text('မသိမ်းပါ',
+              style: GoogleFonts.poppins(color: AppColors.textMedium)),
+        ),
+        ElevatedButton(
+          onPressed: _saving ? null : _save,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          child: _saving
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : Text('သိမ်းရန်',
+                  style: GoogleFonts.poppins(
+                      color: Colors.white, fontWeight: FontWeight.w600)),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExpenseStat extends StatelessWidget {
+  final String label;
+  final double amount;
+  final IconData icon;
+  final bool highlight;
+  const _ExpenseStat({
+    required this.label,
+    required this.amount,
+    required this.icon,
+    this.highlight = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = highlight ? AppColors.primary : const Color(0xFFE53935);
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: color.withValues(alpha: 0.25)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: color, size: 18),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: GoogleFonts.poppins(
+                          color: AppColors.textMedium,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500)),
+                  Text(fmtPrice(amount),
+                      style: GoogleFonts.poppins(
+                          color: color,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15),
+                      overflow: TextOverflow.ellipsis),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Fly-to-cart overlay animation ───────────────────────────────────────────
+
+class _FlyToCartWidget extends StatefulWidget {
+  final String imageUrl;
+  final Offset start;
+  final Offset end;
+  final VoidCallback onDone;
+
+  const _FlyToCartWidget({
+    required this.imageUrl,
+    required this.start,
+    required this.end,
+    required this.onDone,
+  });
+
+  @override
+  State<_FlyToCartWidget> createState() => _FlyToCartWidgetState();
+}
+
+class _FlyToCartWidgetState extends State<_FlyToCartWidget>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 550),
+    );
+    _scale = Tween<double>(begin: 1.0, end: 0.22).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInBack),
+    );
+    _opacity = TweenSequence<double>([
+      TweenSequenceItem(tween: ConstantTween(1.0), weight: 70),
+      TweenSequenceItem(
+          tween: Tween(begin: 1.0, end: 0.0)
+              .chain(CurveTween(curve: Curves.easeIn)),
+          weight: 30),
+    ]).animate(_ctrl);
+
+    _ctrl.forward().then((_) => widget.onDone());
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const double imgSize = 72;
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) {
+        final t = _ctrl.value;
+        final dx = _lerp(widget.start.dx, widget.end.dx, t);
+        final dy = _lerp(widget.start.dy, widget.end.dy, t);
+        final sc = _scale.value;
+        final op = _opacity.value;
+        return Stack(
+          children: [
+            Positioned(
+              left: dx - imgSize * sc / 2,
+              top: dy - imgSize * sc / 2,
+              child: IgnorePointer(
+                child: Opacity(
+                  opacity: op,
+                  child: Transform.scale(
+                    scale: sc,
+                    child: Container(
+                      width: imgSize,
+                      height: imgSize,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.primary.withValues(alpha: 0.45),
+                            blurRadius: 16,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.network(
+                          widget.imageUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: AppColors.primary.withValues(alpha: 0.3),
+                            child: const Icon(
+                                Icons.image_not_supported_outlined,
+                                color: Colors.white54,
+                                size: 28),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  static double _lerp(double a, double b, double t) {
+    // Cubic ease-in curve for natural arc
+    final curved = t * t * (3 - 2 * t);
+    return a + (b - a) * curved;
+  }
 }
