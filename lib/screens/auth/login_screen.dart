@@ -6,6 +6,7 @@ import '../../core/theme.dart';
 import '../../core/responsive.dart';
 import '../../core/navigation.dart';
 import '../../controllers/auth_controller.dart';
+import '../../core/app_router.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -64,6 +65,7 @@ class _LoginScreenState extends State<LoginScreen>
     if (!mounted) return;
     if (success) {
       if (auth.isAdmin) {
+        AppRouter.prefetchAdminBundle(); // prefetch admin chunk while navigation begins
         goTo('/admin');
       } else {
         goTo('/main');

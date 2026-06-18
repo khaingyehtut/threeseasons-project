@@ -282,7 +282,7 @@ class AppTranslations extends Translations {
     'dont_have_account': 'အကောင့် မရှိသေးဘူးလား?',
     'already_have_account': 'အကောင့် ရှိပြီးသားလား?',
     'create_account': 'အကောင့် ဖန်တီးမည်',
-    'join_three_seasons': 'သုံးရာသီဖိနပ်ဆိုင်',
+    'join_three_seasons': '၅၄သုံးရာသီဖိနပ်ဆိုင်',
     'sign_in_to_continue': 'ဝယ်ယူရန် ဆက်လက် ဝင်ရောက်ပါ',
     'email_required': 'အီးမေးလ်လိပ်စာ ထည့်သွင်းရမည်',
     'email_invalid': 'မှန်ကန်သော အီးမေးလ်လိပ်စာ ထည့်ပါ',

@@ -106,6 +106,11 @@ class AppRouter {
   static final _rootKey = GlobalKey<NavigatorState>();
   static GoRouter get router => _router;
 
+  /// Starts downloading the admin JS chunk in the background.
+  /// Call this right after confirming a user is admin so the chunk is
+  /// ready (or already cached) by the time the admin dashboard mounts.
+  static void prefetchAdminBundle() => admin_dash.loadLibrary();
+
   static final _authListenable = _AuthListenable();
 
   static final GoRouter _router = GoRouter(

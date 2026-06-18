@@ -243,7 +243,7 @@ class _SplashScreenState extends State<SplashScreen>
                             ).createShader(rect);
                           },
                           child: Text(
-                            'သုံးရာသီ ဖိနပ်ဆိုင်',
+                            '၅၄သုံးရာသီ ဖိနပ်ဆိုင်',
                             style: GoogleFonts.poppins(
                               fontSize: 34,
                               fontWeight: FontWeight.w700,

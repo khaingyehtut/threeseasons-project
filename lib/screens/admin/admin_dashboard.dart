@@ -262,10 +262,15 @@ class _DashboardTabState extends State<_DashboardTab> {
   int monthPosCount = 0;
   List<Map<String, dynamic>> recentPosSales = [];
 
+  // Visitor stats
+  int todayVisitors = 0;
+  int monthVisitors = 0;
+
   StreamSubscription? _ordersSub;
   StreamSubscription? _productsSub;
   StreamSubscription? _usersSub;
   StreamSubscription? _posSub;
+  StreamSubscription? _visitsSub;
 
   @override
   void initState() {
@@ -279,6 +284,7 @@ class _DashboardTabState extends State<_DashboardTab> {
     _productsSub?.cancel();
     _usersSub?.cancel();
     _posSub?.cancel();
+    _visitsSub?.cancel();
     super.dispose();
   }
 
@@ -396,6 +402,32 @@ class _DashboardTabState extends State<_DashboardTab> {
           todayPosCount = todayCount;
           monthPosCount = monthCount;
           recentPosSales = recent;
+        });
+      }
+    });
+
+    // Visitor tracking — unique users per day (stored by auth_controller)
+    final todayStr =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final monthStartStr =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-01';
+
+    _visitsSub?.cancel();
+    _visitsSub = db
+        .collection('visits')
+        .where('date', isGreaterThanOrEqualTo: monthStartStr)
+        .snapshots()
+        .listen((snap) {
+      int today = 0;
+      int month = 0;
+      for (final doc in snap.docs) {
+        month++;
+        if ((doc.data()['date'] ?? '') == todayStr) today++;
+      }
+      if (mounted) {
+        setState(() {
+          todayVisitors = today;
+          monthVisitors = month;
         });
       }
     });
@@ -700,6 +732,28 @@ class _DashboardTabState extends State<_DashboardTab> {
             begin: Alignment.topLeft,
             end: Alignment.bottomRight),
         trend: '$monthPosCount ရောင်းချမှု',
+        up: true,
+      ),
+      _StatData(
+        label: 'ယနေ့ ဝင်ရောက်သူ',
+        value: todayVisitors.toString(),
+        icon: Icons.visibility_rounded,
+        gradient: const LinearGradient(
+            colors: [Color(0xFF0984E3), Color(0xFF74B9FF)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight),
+        trend: 'unique visitors',
+        up: true,
+      ),
+      _StatData(
+        label: 'လ ဝင်ရောက်သူ',
+        value: monthVisitors.toString(),
+        icon: Icons.bar_chart_rounded,
+        gradient: const LinearGradient(
+            colors: [Color(0xFFE17055), Color(0xFFFF9F43)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight),
+        trend: 'this month',
         up: true,
       ),
     ];

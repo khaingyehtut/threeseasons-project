@@ -9,7 +9,7 @@ class ReceiptSettings {
   final bool showDate;
 
   const ReceiptSettings({
-    this.storeName = 'သုံးရာသီဖိနပ်ဆိုင်',
+    this.storeName = '၅၄သုံးရာသီဖိနပ်ဆိုင်',
     this.storeAddress = '54 လမ်း, 115D လမ်းထောင့်',
     this.footer = '🙏အားပေးမှုကိုကျေးဇူးတင်ပါတယ်🙏',
     this.showId = true,

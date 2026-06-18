@@ -27,6 +27,7 @@ class AuthController extends GetxController {
         user.value = await _authService.getProfile();
         wishlist.value = List<String>.from(user.value?.wishlist ?? []);
         _saveFcmToken(fbUser.uid);
+        _logVisit();
       }
     } catch (e) {
       user.value = null;
@@ -42,7 +43,10 @@ class AuthController extends GetxController {
     try {
       user.value = await _authService.login(email, password);
       wishlist.value = List<String>.from(user.value?.wishlist ?? []);
-      if (user.value != null) _saveFcmToken(user.value!.id);
+      if (user.value != null) {
+        _saveFcmToken(user.value!.id);
+        _logVisit();
+      }
       return true;
     } catch (e) {
       error.value = e.toString();
@@ -55,6 +59,28 @@ class AuthController extends GetxController {
   Future<void> retryFcmToken() async {
     final uid = user.value?.id;
     if (uid != null) await _saveFcmToken(uid);
+  }
+
+  Future<void> _logVisit() async {
+    try {
+      final uid = user.value?.id ?? FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) return;
+      if (user.value?.isAdmin ?? false) return; // don't count admin visits
+      final now = DateTime.now();
+      final dateStr =
+          '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      await FirebaseFirestore.instance
+          .collection('visits')
+          .doc('${uid}_$dateStr')
+          .set({
+        'userId': uid,
+        'date': dateStr,
+        'timestamp': FieldValue.serverTimestamp(),
+        'platform': kIsWeb ? 'web' : defaultTargetPlatform.name.toLowerCase(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('[Visits] _logVisit failed: $e');
+    }
   }
 
   Future<void> _saveFcmToken(String uid) async {
