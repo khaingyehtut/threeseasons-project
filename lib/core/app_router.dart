@@ -243,5 +243,6 @@ class AppRouter {
         },
       ),
     ],
+    errorBuilder: (context, state) => const SplashScreen(),
   );
 }
