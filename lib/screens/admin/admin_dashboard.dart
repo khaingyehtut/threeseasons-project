@@ -43,6 +43,7 @@ import '../../services/upload_service.dart';
 import '../../models/announcement_model.dart';
 import '../../services/announcement_service.dart';
 import '../chat/chat_screen.dart';
+import '../map/map_picker_screen.dart';
 import 'pos_screen.dart';
 import 'label_print_screen.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -6897,8 +6898,6 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
   final _kpayNameCtrl = TextEditingController();
   final _waveNumCtrl = TextEditingController();
   final _waveNameCtrl = TextEditingController();
-  final _mandalayFeeCtrl = TextEditingController();
-
   static const _statuses = ['pending', 'approved', 'rejected'];
 
   @override
@@ -6915,7 +6914,6 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
     _kpayNameCtrl.dispose();
     _waveNumCtrl.dispose();
     _waveNameCtrl.dispose();
-    _mandalayFeeCtrl.dispose();
     super.dispose();
   }
 
@@ -7030,106 +7028,31 @@ class _AdminPaymentsTabState extends State<_AdminPaymentsTab>
     );
   }
 
+  static const _defaultDeliverySettings = {
+    'mode': 'per_mile', 'baseFee': 3000.0, 'feePerMile': 0.0,
+    'storeLat': null, 'storeLng': null, 'zones': <Map<String, dynamic>>[],
+  };
+
   Future<void> _showDeliveryFeeSheet() async {
-    final current = await PaymentService().mandalayFeeStream().first;
-    _mandalayFeeCtrl.text = current.toString();
+    Map<String, dynamic> current;
+    try {
+      current = await PaymentService()
+          .deliverySettingsStream()
+          .first
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {
+      current = _defaultDeliverySettings;
+    }
     if (!mounted) return;
-
-    bool saving = false;
-
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.card,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Padding(
-          padding: EdgeInsets.fromLTRB(
-              20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 32),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                    color: AppColors.border,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            Row(children: [
-              Text('ပို့ဆောင်ခ ဆက်တင်',
-                  style: GoogleFonts.poppins(
-                      color: AppColors.textPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700)),
-              const Spacer(),
-              IconButton(
-                  icon: Icon(Icons.close_rounded, color: AppColors.textMedium),
-                  onPressed: () => Navigator.pop(ctx)),
-            ]),
-            const SizedBox(height: 16),
-            _DeliveryFeeField(
-              label: 'မန္တလေးမြို့ ပို့ဆောင်ခ (ကျပ်)',
-              hint: 'e.g. 3000',
-              controller: _mandalayFeeCtrl,
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Fixed fee for Mandalay city orders.\nOther areas: admin contacts customer via chat or notification.',
-                style: GoogleFonts.poppins(
-                    fontSize: 11, color: AppColors.textMedium, height: 1.5),
-              ),
-            ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: saving
-                    ? null
-                    : () async {
-                        final fee =
-                            double.tryParse(_mandalayFeeCtrl.text.trim());
-                        if (fee == null) {
-                          if (mounted)
-                            _snack('Enter a valid number', AppColors.error);
-                          return;
-                        }
-                        setSheet(() => saving = true);
-                        try {
-                          await PaymentService().saveMandalayFee(fee);
-                          if (ctx.mounted) Navigator.pop(ctx);
-                          if (mounted)
-                            _snack('Delivery fee saved ✅', AppColors.success);
-                        } catch (e) {
-                          setSheet(() => saving = false);
-                          if (mounted) _snack(e.toString(), AppColors.error);
-                        }
-                      },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                child: saving
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2))
-                    : Text('သိမ်းဆည်းရန်',
-                        style: GoogleFonts.poppins(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600)),
-              ),
-            ),
-          ]),
-        ),
+      builder: (_) => _DeliverySettingsSheet(
+        initial: current,
+        onSaved: () => _snack('ပို့ဆောင်ခ သိမ်းပြီး ✅', AppColors.success),
       ),
     );
   }
@@ -7401,14 +7324,510 @@ class _AccountSettingsSection extends StatelessWidget {
   }
 }
 
+// ── Zone entry controller holder ──────────────────────────────────────────────
+
+class _ZoneEntry {
+  final TextEditingController minCtrl;
+  final TextEditingController maxCtrl;
+  final TextEditingController feeCtrl;
+
+  _ZoneEntry({String min = '0', String max = '', String fee = ''})
+      : minCtrl = TextEditingController(text: min),
+        maxCtrl = TextEditingController(text: max),
+        feeCtrl = TextEditingController(text: fee);
+
+  void dispose() {
+    minCtrl.dispose();
+    maxCtrl.dispose();
+    feeCtrl.dispose();
+  }
+
+  Map<String, dynamic> toMap() => {
+        'minMiles': double.tryParse(minCtrl.text.trim()) ?? 0.0,
+        'maxMiles': double.tryParse(maxCtrl.text.trim()),
+        'fee': double.tryParse(feeCtrl.text.trim()) ?? 0.0,
+      };
+
+  static _ZoneEntry fromMap(Map<String, dynamic> m) => _ZoneEntry(
+        min: numStr((m['minMiles'] as double?) ?? 0.0),
+        max: m['maxMiles'] != null ? numStr(m['maxMiles'] as double) : '',
+        fee: numStr((m['fee'] as double?) ?? 0.0),
+      );
+}
+
+// ── Delivery settings sheet (mode toggle + per-mile + zone) ──────────────────
+
+class _DeliverySettingsSheet extends StatefulWidget {
+  final Map<String, dynamic> initial;
+  final VoidCallback onSaved;
+  const _DeliverySettingsSheet({required this.initial, required this.onSaved});
+
+  @override
+  State<_DeliverySettingsSheet> createState() => _DeliverySettingsSheetState();
+}
+
+class _DeliverySettingsSheetState extends State<_DeliverySettingsSheet> {
+  late String _mode;
+  final _baseFeeCtrl    = TextEditingController();
+  final _feePerMileCtrl = TextEditingController();
+  double? _storeLat;
+  double? _storeLng;
+  final List<_ZoneEntry> _zones = [];
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.initial;
+    _mode = (s['mode'] as String?) ?? 'per_mile';
+    _baseFeeCtrl.text    = numStr((s['baseFee']    as double?) ?? 3000.0);
+    _feePerMileCtrl.text = numStr((s['feePerMile'] as double?) ?? 0.0);
+    _storeLat = s['storeLat'] as double?;
+    _storeLng = s['storeLng'] as double?;
+    final rawZones = s['zones'] as List<Map<String, dynamic>>? ?? [];
+    for (final z in rawZones) _zones.add(_ZoneEntry.fromMap(z));
+    if (_zones.isEmpty) {
+      _zones.addAll([
+        _ZoneEntry(min: '0',  max: '2',  fee: '2000'),
+        _ZoneEntry(min: '2',  max: '5',  fee: '3500'),
+        _ZoneEntry(min: '5',  max: '10', fee: '6000'),
+        _ZoneEntry(min: '10', max: '',   fee: '9000'),
+      ]);
+    }
+  }
+
+  @override
+  void dispose() {
+    _baseFeeCtrl.dispose();
+    _feePerMileCtrl.dispose();
+    for (final z in _zones) z.dispose();
+    super.dispose();
+  }
+
+  void _showErr(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: GoogleFonts.poppins(color: Colors.white)),
+      backgroundColor: AppColors.error,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    ));
+  }
+
+  Future<void> _save() async {
+    double baseFeeForSave = 0;
+    double fpmForSave     = 0;
+    List<Map<String, dynamic>> zonesForSave = [];
+
+    if (_mode == 'per_mile') {
+      final bf  = double.tryParse(_baseFeeCtrl.text.trim());
+      final fpm = double.tryParse(_feePerMileCtrl.text.trim());
+      if (bf == null || fpm == null) {
+        _showErr('ငွေပမာဏ မှန်ကန်စွာ ထည့်ပါ');
+        return;
+      }
+      baseFeeForSave = bf;
+      fpmForSave     = fpm;
+    } else {
+      zonesForSave = _zones
+          .map((z) => z.toMap())
+          .where((m) => (m['fee'] as double) > 0)
+          .toList();
+      if (zonesForSave.isEmpty) {
+        _showErr('အနည်းဆုံး ဇုန် တစ်ခု ထည့်ပါ');
+        return;
+      }
+      baseFeeForSave = (zonesForSave.first['fee'] as double?) ?? 0;
+    }
+
+    setState(() => _saving = true);
+    try {
+      await PaymentService().saveDeliverySettings(
+        mode:       _mode,
+        baseFee:    baseFeeForSave,
+        feePerMile: fpmForSave,
+        storeLat:   _storeLat,
+        storeLng:   _storeLng,
+        zones:      zonesForSave,
+      );
+      if (mounted) Navigator.pop(context);
+      widget.onSaved();
+    } catch (e) {
+      setState(() => _saving = false);
+      _showErr(e.toString());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.88,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (_, scrollCtrl) => Column(children: [
+        // ── Handle ─────────────────────────────────────────────────────
+        Center(
+          child: Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(top: 12, bottom: 4),
+            decoration: BoxDecoration(
+                color: AppColors.border, borderRadius: BorderRadius.circular(2)),
+          ),
+        ),
+        // ── Title ──────────────────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 8, 0),
+          child: Row(children: [
+            Icon(Icons.local_shipping_rounded, color: AppColors.primary, size: 20),
+            const SizedBox(width: 8),
+            Text('ပို့ဆောင်ခ ဆက်တင်',
+                style: GoogleFonts.poppins(
+                    color: AppColors.textPrimary, fontSize: 16,
+                    fontWeight: FontWeight.w700)),
+            const Spacer(),
+            IconButton(
+                icon: Icon(Icons.close_rounded, color: AppColors.textMedium),
+                onPressed: () => Navigator.pop(context)),
+          ]),
+        ),
+        // ── Mode toggle ─────────────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          child: Row(children: [
+            _ModeChip(
+              label: 'တစ် မိုင်ဈေးနှုန်း',
+              icon: Icons.straighten_rounded,
+              selected: _mode == 'per_mile',
+              onTap: () => setState(() => _mode = 'per_mile'),
+            ),
+            const SizedBox(width: 10),
+            _ModeChip(
+              label: 'ဇုန် ဈေးနှုန်း',
+              icon: Icons.layers_rounded,
+              selected: _mode == 'zone',
+              onTap: () => setState(() => _mode = 'zone'),
+            ),
+          ]),
+        ),
+        // ── Body ───────────────────────────────────────────────────────
+        Expanded(
+          child: ListView(
+            controller: scrollCtrl,
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+            children: [
+              _buildStoreLocation(),
+              const SizedBox(height: 20),
+              if (_mode == 'per_mile') _buildPerMileSection()
+              else _buildZoneSection(),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
+                  ),
+                  child: _saving
+                      ? const SizedBox(width: 20, height: 20,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2))
+                      : Text('သိမ်းဆည်းရန်',
+                          style: GoogleFonts.poppins(
+                              color: Colors.white, fontSize: 15,
+                              fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildStoreLocation() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.store_rounded, color: AppColors.primary, size: 16),
+          const SizedBox(width: 6),
+          Text('ဆိုင် တည်နေရာ',
+              style: GoogleFonts.poppins(
+                  color: AppColors.textPrimary, fontSize: 13,
+                  fontWeight: FontWeight.w600)),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: () async {
+              final result = await Navigator.push<Map<String, dynamic>>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MapPickerScreen(
+                    initialPosition: (_storeLat != null && _storeLng != null)
+                        ? LatLng(_storeLat!, _storeLng!)
+                        : null,
+                  ),
+                ),
+              );
+              if (result != null && mounted) {
+                setState(() {
+                  _storeLat = result['lat'] as double?;
+                  _storeLng = result['lng'] as double?;
+                });
+              }
+            },
+            icon: Icon(Icons.map_outlined, size: 15, color: AppColors.primary),
+            label: Text('ရွေးရန်',
+                style: GoogleFonts.poppins(
+                    color: AppColors.primary, fontSize: 12,
+                    fontWeight: FontWeight.w600)),
+            style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
+          ),
+        ]),
+        if (_storeLat != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Lat: ${_storeLat!.toStringAsFixed(6)},  Lng: ${_storeLng!.toStringAsFixed(6)}',
+            style: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 11),
+          ),
+        ] else ...[
+          const SizedBox(height: 4),
+          Text('မပေးထားသေးပါ — မပေးပါက မူလ ပို့ဆောင်ခသာ ကောက်ခံမည်',
+              style: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 10)),
+        ],
+      ]),
+    );
+  }
+
+  Widget _buildPerMileSection() {
+    return StatefulBuilder(builder: (_, setSub) {
+      final baseFee    = double.tryParse(_baseFeeCtrl.text.trim()) ?? 0;
+      final feePerMile = double.tryParse(_feePerMileCtrl.text.trim()) ?? 0;
+
+      Widget prevRow(double miles) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(children: [
+          Text('${numStr(miles)} မိုင်',
+              style: GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 12)),
+          const Spacer(),
+          Text(fmtPrice(baseFee + miles * feePerMile),
+              style: GoogleFonts.poppins(
+                  color: AppColors.textPrimary, fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ]),
+      );
+
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _DeliveryFeeField(
+          label: 'မူလ ပို့ဆောင်ခ (ကျပ်)',
+          hint: 'e.g. 2000',
+          controller: _baseFeeCtrl,
+          onChanged: (_) => setSub(() {}),
+        ),
+        const SizedBox(height: 4),
+        Text('နည်းဆုံး ပို့ဆောင်ခ — နီးသောဝယ်သူများကိုလည်း ကောက်ခံသည်',
+            style: GoogleFonts.poppins(fontSize: 10, color: AppColors.textMedium)),
+        const SizedBox(height: 14),
+        _DeliveryFeeField(
+          label: 'တစ် မိုင်လျှင် ဖြည့်ငွေ (ကျပ်)',
+          hint: 'e.g. 500',
+          controller: _feePerMileCtrl,
+          onChanged: (_) => setSub(() {}),
+        ),
+        const SizedBox(height: 4),
+        Text('အကွာအဝေး (မိုင်) × ဤငွေ = ထပ်ဆောင်း ကျသင့်ငွေ',
+            style: GoogleFonts.poppins(fontSize: 10, color: AppColors.textMedium)),
+        if (feePerMile > 0) ...[
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: AppColors.primaryLight.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.primary.withValues(alpha: 0.15)),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('ကြိုတင် တွက်ချက်မှု',
+                  style: GoogleFonts.poppins(
+                      color: AppColors.primary, fontSize: 12,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              prevRow(1), prevRow(2), prevRow(5), prevRow(10),
+            ]),
+          ),
+        ],
+      ]);
+    });
+  }
+
+  Widget _buildZoneSection() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Text('ဒေသ ဇုန် ဈေးနှုန်းများ',
+            style: GoogleFonts.poppins(
+                color: AppColors.textPrimary, fontSize: 13,
+                fontWeight: FontWeight.w600)),
+        const Spacer(),
+        TextButton.icon(
+          onPressed: () => setState(() {
+            final lastMax = _zones.isNotEmpty ? _zones.last.maxCtrl.text.trim() : '0';
+            _zones.add(_ZoneEntry(min: lastMax.isNotEmpty ? lastMax : '0'));
+          }),
+          icon: Icon(Icons.add_circle_outline_rounded,
+              size: 16, color: AppColors.primary),
+          label: Text('ဇုန် ထည့်ရန်',
+              style: GoogleFonts.poppins(
+                  color: AppColors.primary, fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+          style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2)),
+        ),
+      ]),
+      const SizedBox(height: 4),
+      Text('မိုင် အကွာအဝေး အလိုက် ပို့ဆောင်ခ သတ်မှတ်ပါ',
+          style: GoogleFonts.poppins(fontSize: 10, color: AppColors.textMedium)),
+      const SizedBox(height: 12),
+      // Column headers
+      Row(children: [
+        SizedBox(width: 70,
+            child: Text('မိုင် (မ)',
+                style: GoogleFonts.poppins(
+                    color: AppColors.textMedium, fontSize: 10,
+                    fontWeight: FontWeight.w600))),
+        const SizedBox(width: 6),
+        SizedBox(width: 70,
+            child: Text('မိုင် (အထိ)',
+                style: GoogleFonts.poppins(
+                    color: AppColors.textMedium, fontSize: 10,
+                    fontWeight: FontWeight.w600))),
+        const SizedBox(width: 6),
+        Expanded(child: Text('ပို့ဆောင်ခ (ကျပ်)',
+            style: GoogleFonts.poppins(
+                color: AppColors.textMedium, fontSize: 10,
+                fontWeight: FontWeight.w600))),
+      ]),
+      const SizedBox(height: 6),
+      for (int i = 0; i < _zones.length; i++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(children: [
+            SizedBox(width: 70, child: _ZoneField(ctrl: _zones[i].minCtrl, hint: '0')),
+            const SizedBox(width: 6),
+            SizedBox(width: 70, child: _ZoneField(ctrl: _zones[i].maxCtrl, hint: '∞')),
+            const SizedBox(width: 6),
+            Expanded(child: _ZoneField(ctrl: _zones[i].feeCtrl, hint: 'ကျပ်')),
+            const SizedBox(width: 6),
+            GestureDetector(
+              onTap: () => setState(() {
+                _zones[i].dispose();
+                _zones.removeAt(i);
+              }),
+              child: Icon(Icons.remove_circle_outline_rounded,
+                  color: AppColors.error, size: 20),
+            ),
+          ]),
+        ),
+    ]);
+  }
+}
+
+// ── Mode toggle chip ──────────────────────────────────────────────────────────
+
+class _ModeChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _ModeChip(
+      {required this.label,
+      required this.icon,
+      required this.selected,
+      required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : AppColors.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+              color: selected ? AppColors.primary : AppColors.border),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon,
+              size: 14,
+              color: selected ? Colors.white : AppColors.textMedium),
+          const SizedBox(width: 6),
+          Text(label,
+              style: GoogleFonts.poppins(
+                  color: selected ? Colors.white : AppColors.textMedium,
+                  fontSize: 12,
+                  fontWeight:
+                      selected ? FontWeight.w600 : FontWeight.w400)),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── Compact text field for zone rows ─────────────────────────────────────────
+
+class _ZoneField extends StatelessWidget {
+  final TextEditingController ctrl;
+  final String hint;
+  const _ZoneField({required this.ctrl, required this.hint});
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: ctrl,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      textAlign: TextAlign.center,
+      style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 12),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle:
+            GoogleFonts.poppins(color: AppColors.textMedium, fontSize: 12),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: AppColors.border)),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: AppColors.border)),
+        focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: AppColors.primary)),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _DeliveryFeeField extends StatelessWidget {
   final String label;
   final String hint;
   final TextEditingController controller;
+  final ValueChanged<String>? onChanged;
   const _DeliveryFeeField({
     required this.label,
     required this.hint,
     required this.controller,
+    this.onChanged,
   });
 
   @override
@@ -7416,6 +7835,7 @@ class _DeliveryFeeField extends StatelessWidget {
     return TextField(
       controller: controller,
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      onChanged: onChanged,
       style: GoogleFonts.poppins(color: AppColors.textPrimary, fontSize: 13),
       decoration: InputDecoration(
         labelText: label,
@@ -7453,6 +7873,23 @@ class _PaymentList extends StatelessWidget {
     return StreamBuilder<List<PaymentModel>>(
       stream: PaymentService().allPaymentsStream(status: status),
       builder: (_, snap) {
+        if (snap.hasError) {
+          return Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.error_outline_rounded,
+                  size: 48, color: AppColors.error),
+              const SizedBox(height: 10),
+              Text('ဒေတာ ရယူ၍မရပါ',
+                  style: GoogleFonts.poppins(
+                      color: AppColors.textMedium, fontSize: 13)),
+              const SizedBox(height: 4),
+              Text('${snap.error}',
+                  style: GoogleFonts.poppins(
+                      color: AppColors.textMedium, fontSize: 10),
+                  textAlign: TextAlign.center),
+            ]),
+          );
+        }
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(
               child: CircularProgressIndicator(color: AppColors.primary));

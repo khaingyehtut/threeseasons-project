@@ -24,8 +24,13 @@ class CartScreen extends StatefulWidget {
 }
 
 class _CartScreenState extends State<CartScreen> {
-  double _mandalayFee = 3000.0;
-  StreamSubscription<double>? _deliverySub;
+  Map<String, dynamic> _deliverySettings = {
+    'baseFee': 3000.0,
+    'feePerMile': 0.0,
+    'storeLat': null,
+    'storeLng': null,
+  };
+  StreamSubscription<Map<String, dynamic>>? _deliverySub;
 
   @override
   void initState() {
@@ -34,8 +39,8 @@ class _CartScreenState extends State<CartScreen> {
       final uid = Get.find<AuthController>().user.value?.id;
       if (uid != null) Get.find<CartController>().fetchCart(uid);
     });
-    _deliverySub = PaymentService().mandalayFeeStream().listen((fee) {
-      if (mounted) setState(() => _mandalayFee = fee);
+    _deliverySub = PaymentService().deliverySettingsStream().listen((settings) {
+      if (mounted) setState(() => _deliverySettings = settings);
     });
   }
 
@@ -45,7 +50,9 @@ class _CartScreenState extends State<CartScreen> {
     super.dispose();
   }
 
-  double _computeShipping(double subtotal) => _mandalayFee;
+  double get _baseFee => (_deliverySettings['baseFee'] as double?) ?? 3000.0;
+
+  double _computeShipping(double subtotal) => _baseFee;
 
   double _computeTotal(double subtotal) =>
       subtotal + _computeShipping(subtotal);
@@ -58,7 +65,7 @@ class _CartScreenState extends State<CartScreen> {
       builder: (_) => _CheckoutSheet(
         cartProvider: cartProvider,
         subtotal: cartProvider.totalPrice,
-        mandalayFee: _mandalayFee,
+        deliverySettings: _deliverySettings,
         onOrderPlaced: (orderRef, paymentMethod, total, orderId) {
           if (!mounted) return;
           if (paymentMethod == 'KPay' || paymentMethod == 'Wave Money') {
@@ -695,13 +702,13 @@ class _CartScreenState extends State<CartScreen> {
 class _CheckoutSheet extends StatefulWidget {
   final CartController cartProvider;
   final double subtotal;
-  final double mandalayFee;
+  final Map<String, dynamic> deliverySettings;
   final void Function(String orderRef, String paymentMethod, double total, String orderId) onOrderPlaced;
 
   const _CheckoutSheet({
     required this.cartProvider,
     required this.subtotal,
-    required this.mandalayFee,
+    required this.deliverySettings,
     required this.onOrderPlaced,
   });
 
@@ -719,7 +726,19 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
   double? _pickedLat;
   double? _pickedLng;
 
-  double get _shipping => widget.mandalayFee;
+  double get _shipping {
+    final s = widget.deliverySettings;
+    return PaymentService.computeDeliveryFee(
+      mode:        (s['mode']       as String?) ?? 'per_mile',
+      baseFee:     (s['baseFee']    as num?)?.toDouble() ?? 3000.0,
+      feePerMile:  (s['feePerMile'] as num?)?.toDouble() ?? 0.0,
+      zones:       List<Map<String, dynamic>>.from((s['zones'] as List?) ?? []),
+      storeLat:    (s['storeLat']   as num?)?.toDouble(),
+      storeLng:    (s['storeLng']   as num?)?.toDouble(),
+      customerLat: _pickedLat,
+      customerLng: _pickedLng,
+    );
+  }
 
   double get _total => widget.subtotal + _shipping;
 
@@ -939,6 +958,33 @@ class _CheckoutSheetState extends State<_CheckoutSheet> {
                           'shipping'.tr,
                           fmtPrice(_shipping),
                         ),
+                        Builder(builder: (_) {
+                          final s    = widget.deliverySettings;
+                          final mode = (s['mode'] as String?) ?? 'per_mile';
+                          final sLat = (s['storeLat'] as num?)?.toDouble();
+                          final sLng = (s['storeLng'] as num?)?.toDouble();
+                          if (_pickedLat == null || sLat == null) {
+                            return const SizedBox.shrink();
+                          }
+                          final miles = PaymentService.haversineMiles(
+                              sLat, sLng!, _pickedLat!, _pickedLng!);
+                          final String hint;
+                          if (mode == 'zone') {
+                            hint = '${miles.toStringAsFixed(1)} မိုင် (ဇုန် ဈေးနှုန်း)';
+                          } else {
+                            final fpm = (s['feePerMile'] as num?)?.toDouble() ?? 0;
+                            if (fpm == 0) return const SizedBox.shrink();
+                            hint = '${miles.toStringAsFixed(1)} မိုင် × ${fmtPrice(fpm)}/မိုင်';
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 3),
+                            child: Text(hint,
+                              style: GoogleFonts.poppins(
+                                  color: AppColors.textMedium, fontSize: 10),
+                              textAlign: TextAlign.end,
+                            ),
+                          );
+                        }),
                         Padding(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           child: Divider(color: AppColors.border),
